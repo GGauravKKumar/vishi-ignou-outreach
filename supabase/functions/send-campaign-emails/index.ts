@@ -71,12 +71,12 @@ serve(async (req) => {
 
     console.log(`SMTP Config: ${smtpConfig.host}:${smtpConfig.port} as ${smtpConfig.username}`);
 
-    // Initialize SMTP client
+    // Initialize SMTP client - use STARTTLS for port 587
     const client = new SMTPClient({
       connection: {
         hostname: smtpConfig.host,
         port: smtpConfig.port,
-        tls: true,
+        tls: false,
         auth: {
           username: smtpConfig.username,
           password: smtpPassword,
