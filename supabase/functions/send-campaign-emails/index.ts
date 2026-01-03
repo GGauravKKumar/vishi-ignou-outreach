@@ -1,7 +1,6 @@
-// @ts-nocheck
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import nodemailer from "https://esm.sh/nodemailer@6.9.10";
+import { SMTPClient } from "https://deno.land/x/denomailer@1.6.0/mod.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -22,6 +21,7 @@ interface EmailRequest {
     body: string;
   };
   recipients: Recipient[];
+  isRetry?: boolean;
 }
 
 const personalizeContent = (content: string, recipient: Recipient): string => {
@@ -30,6 +30,8 @@ const personalizeContent = (content: string, recipient: Recipient): string => {
     .replace(/\{\{email\}\}/gi, recipient.email)
     .replace(/\{\{course\}\}/gi, recipient.course);
 };
+
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 serve(async (req) => {
   // Handle CORS preflight
@@ -52,8 +54,8 @@ serve(async (req) => {
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    const { campaignId, template, recipients }: EmailRequest = await req.json();
-    console.log(`Processing campaign ${campaignId} with ${recipients.length} recipients`);
+    const { campaignId, template, recipients, isRetry }: EmailRequest = await req.json();
+    console.log(`Processing campaign ${campaignId} with ${recipients.length} recipients${isRetry ? ' (RETRY)' : ''}`);
 
     // Get SMTP config from database
     const { data: smtpConfig, error: smtpError } = await supabase
@@ -70,40 +72,17 @@ serve(async (req) => {
       );
     }
 
-    console.log(`SMTP Config: ${smtpConfig.host}:${smtpConfig.port} as ${smtpConfig.username}`);
-
-    // Create nodemailer transporter with proper TLS settings for port 587
-    const transporter = nodemailer.createTransport({
-      host: smtpConfig.host,
-      port: smtpConfig.port,
-      secure: smtpConfig.port === 465, // true for 465, false for 587
-      auth: {
-        user: smtpConfig.username,
-        pass: smtpPassword,
-      },
-      tls: {
-        // Do not fail on invalid certs
-        rejectUnauthorized: false,
-        minVersion: "TLSv1.2"
-      }
-    });
-
-    // Verify SMTP connection
-    try {
-      await transporter.verify();
-      console.log("SMTP connection verified successfully");
-    } catch (verifyError) {
-      console.error("SMTP verification failed:", verifyError);
-      return new Response(
-        JSON.stringify({ error: `SMTP connection failed: ${verifyError instanceof Error ? verifyError.message : "Unknown error"}` }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
+    // Use port 465 with SSL for better compatibility
+    const usePort = 465;
+    const useTls = true;
+    
+    console.log(`SMTP Config: ${smtpConfig.host}:${usePort} as ${smtpConfig.username} (TLS: ${useTls})`);
 
     let sentCount = 0;
     let failedCount = 0;
+    const failedRecipients: Recipient[] = [];
 
-    // Send emails to each recipient
+    // Send emails one at a time with a new connection for each
     for (const recipient of recipients) {
       const personalizedSubject = personalizeContent(template.subject, recipient);
       const personalizedBody = personalizeContent(template.body, recipient);
@@ -111,23 +90,43 @@ serve(async (req) => {
       try {
         console.log(`Sending email to ${recipient.email}...`);
         
-        await transporter.sendMail({
-          from: `"${smtpConfig.from_name}" <${smtpConfig.from_email}>`,
+        // Create a new client for each email to avoid connection issues
+        const client = new SMTPClient({
+          connection: {
+            hostname: smtpConfig.host,
+            port: usePort,
+            tls: useTls,
+            auth: {
+              username: smtpConfig.username,
+              password: smtpPassword,
+            },
+          },
+        });
+
+        await client.send({
+          from: `${smtpConfig.from_name} <${smtpConfig.from_email}>`,
           to: recipient.email,
           subject: personalizedSubject,
-          text: personalizedBody,
+          content: personalizedBody,
           html: personalizedBody.replace(/\n/g, "<br>"),
         });
+
+        await client.close();
 
         // Update email log as sent
         await supabase
           .from("email_logs")
-          .update({ status: "sent", sent_at: new Date().toISOString() })
+          .update({ status: "sent", sent_at: new Date().toISOString(), error_message: null })
           .eq("campaign_id", campaignId)
           .eq("student_id", recipient.id);
 
         sentCount++;
         console.log(`✓ Email sent to ${recipient.email}`);
+        
+        // Small delay between emails to avoid rate limiting
+        if (recipients.indexOf(recipient) < recipients.length - 1) {
+          await delay(500);
+        }
       } catch (emailError) {
         console.error(`✗ Failed to send to ${recipient.email}:`, emailError);
         
@@ -142,25 +141,44 @@ serve(async (req) => {
           .eq("student_id", recipient.id);
 
         failedCount++;
+        failedRecipients.push(recipient);
       }
     }
-
-    // Close transporter
-    transporter.close();
 
     // Update campaign status
     const campaignStatus = failedCount === recipients.length ? "failed" : 
                           sentCount === recipients.length ? "sent" : "partial";
     
-    await supabase
-      .from("campaigns")
-      .update({ 
-        status: campaignStatus, 
-        sent_count: sentCount, 
-        failed_count: failedCount,
-        sent_at: new Date().toISOString()
-      })
-      .eq("id", campaignId);
+    // For retry, we need to add to existing counts
+    if (isRetry) {
+      const { data: campaign } = await supabase
+        .from("campaigns")
+        .select("sent_count, failed_count")
+        .eq("id", campaignId)
+        .single();
+      
+      if (campaign) {
+        await supabase
+          .from("campaigns")
+          .update({ 
+            status: campaignStatus,
+            sent_count: campaign.sent_count + sentCount,
+            failed_count: Math.max(0, campaign.failed_count - sentCount + failedCount),
+            sent_at: new Date().toISOString()
+          })
+          .eq("id", campaignId);
+      }
+    } else {
+      await supabase
+        .from("campaigns")
+        .update({ 
+          status: campaignStatus, 
+          sent_count: sentCount, 
+          failed_count: failedCount,
+          sent_at: new Date().toISOString()
+        })
+        .eq("id", campaignId);
+    }
 
     console.log(`Campaign ${campaignId} completed: ${sentCount} sent, ${failedCount} failed`);
 
@@ -168,7 +186,8 @@ serve(async (req) => {
       JSON.stringify({ 
         success: true, 
         sent: sentCount, 
-        failed: failedCount 
+        failed: failedCount,
+        failedRecipients: failedRecipients.map(r => ({ id: r.id, email: r.email, name: r.name }))
       }),
       { 
         status: 200, 
