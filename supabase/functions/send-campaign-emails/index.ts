@@ -31,6 +31,11 @@ const personalizeContent = (content: string, recipient: Recipient): string => {
     .replace(/\{\{course\}\}/gi, recipient.course);
 };
 
+// Convert bare LF to CRLF for RFC 822 compliance
+const normalizeCRLF = (content: string): string => {
+  return content.replace(/\r?\n/g, "\r\n");
+};
+
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 serve(async (req) => {
@@ -103,12 +108,17 @@ serve(async (req) => {
           },
         });
 
+        // Normalize line endings to CRLF for RFC 822 compliance
+        const normalizedBody = normalizeCRLF(personalizedBody);
+        const normalizedSubject = normalizeCRLF(personalizedSubject);
+        const htmlBody = normalizedBody.replace(/\r\n/g, "<br>");
+
         await client.send({
           from: `${smtpConfig.from_name} <${smtpConfig.from_email}>`,
           to: recipient.email,
-          subject: personalizedSubject,
-          content: personalizedBody,
-          html: personalizedBody.replace(/\n/g, "<br>"),
+          subject: normalizedSubject,
+          content: normalizedBody,
+          html: htmlBody,
         });
 
         await client.close();
