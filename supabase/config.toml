@@ -2,3 +2,6 @@ project_id = "riiicknhxexaqmexevzi"
 
 [functions.send-campaign-emails]
 verify_jwt = false
+
+[functions.test-smtp]
+verify_jwt = false
