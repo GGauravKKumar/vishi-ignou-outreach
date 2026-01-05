@@ -21,6 +21,7 @@ export type Database = {
           failed_count: number
           id: string
           name: string
+          pending_count: number
           sent_at: string | null
           sent_count: number
           status: string
@@ -33,6 +34,7 @@ export type Database = {
           failed_count?: number
           id?: string
           name: string
+          pending_count?: number
           sent_at?: string | null
           sent_count?: number
           status?: string
@@ -45,6 +47,7 @@ export type Database = {
           failed_count?: number
           id?: string
           name?: string
+          pending_count?: number
           sent_at?: string | null
           sent_count?: number
           status?: string

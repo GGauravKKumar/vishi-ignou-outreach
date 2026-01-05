@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { BarChart3, RefreshCw, CheckCircle, XCircle, Clock, ChevronDown, ChevronUp, RotateCcw } from "lucide-react";
+import { BarChart3, RefreshCw, CheckCircle, XCircle, Clock, ChevronDown, ChevronUp, RotateCcw, Loader2 } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -38,6 +38,7 @@ interface Campaign {
   status: string;
   sent_count: number;
   failed_count: number;
+  pending_count: number;
   total_recipients: number;
   created_at: string;
   template_id: string;
@@ -61,6 +62,33 @@ export default function Reports() {
 
   useEffect(() => {
     fetchCampaigns();
+
+    // Subscribe to real-time updates on campaigns table
+    const channel = supabase
+      .channel('campaigns-realtime')
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'campaigns'
+        },
+        (payload) => {
+          console.log('Campaign updated:', payload);
+          setCampaigns(prev => 
+            prev.map(c => 
+              c.id === payload.new.id 
+                ? { ...c, ...payload.new } as Campaign
+                : c
+            )
+          );
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   const fetchCampaigns = async () => {
@@ -151,8 +179,8 @@ export default function Reports() {
         course: log.students?.course || "",
       }));
       
-      // Call edge function to resend
-      const { data, error } = await supabase.functions.invoke("send-campaign-emails", {
+      // Call edge function to resend (runs in background)
+      const { error } = await supabase.functions.invoke("send-campaign-emails", {
         body: {
           campaignId,
           template: {
@@ -167,18 +195,13 @@ export default function Reports() {
       if (error) {
         toast.error("Resend failed: " + error.message);
       } else {
-        toast.success(`Resent ${data.sent} emails successfully${data.failed > 0 ? `, ${data.failed} still failed` : ""}`);
-        // Refresh data
-        await fetchCampaigns();
+        toast.success(`Resending ${failedEmails.length} emails in background. Watch the progress below.`);
         // Clear cached logs to force refresh
         setEmailLogs(prev => {
           const newLogs = { ...prev };
           delete newLogs[campaignId];
           return newLogs;
         });
-        if (expandedCampaign === campaignId) {
-          await fetchEmailLogs(campaignId);
-        }
       }
     } catch (error) {
       console.error(error);
@@ -194,6 +217,8 @@ export default function Reports() {
         return <CheckCircle className="h-4 w-4 text-green-500" />;
       case "failed":
         return <XCircle className="h-4 w-4 text-destructive" />;
+      case "sending":
+        return <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />;
       default:
         return <Clock className="h-4 w-4 text-muted-foreground" />;
     }
@@ -266,15 +291,28 @@ export default function Reports() {
                                 <span className="text-green-600 font-medium">{campaign.sent_count}</span>
                                 {" / "}
                                 <span className="text-destructive font-medium">{campaign.failed_count}</span>
+                                {campaign.pending_count > 0 && (
+                                  <>
+                                    {" / "}
+                                    <span className="text-blue-600 font-medium">{campaign.pending_count}</span>
+                                  </>
+                                )}
                                 {" / "}
                                 <span className="text-muted-foreground">{campaign.total_recipients}</span>
                               </p>
-                              <p className="text-xs text-muted-foreground">Sent / Failed / Total</p>
+                              <p className="text-xs text-muted-foreground">
+                                Sent / Failed{campaign.pending_count > 0 ? " / Pending" : ""} / Total
+                              </p>
                             </div>
-                            <span className={`rounded-full px-3 py-1 text-xs font-medium ${getStatusBadge(campaign.status)}`}>
-                              {campaign.status}
-                            </span>
-                            {campaign.failed_count > 0 && (
+                            <div className="flex items-center gap-2">
+                              {campaign.status === "sending" && (
+                                <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />
+                              )}
+                              <span className={`rounded-full px-3 py-1 text-xs font-medium ${getStatusBadge(campaign.status)}`}>
+                                {campaign.status}
+                              </span>
+                            </div>
+                            {campaign.failed_count > 0 && campaign.status !== "sending" && (
                               <Button
                                 variant="outline"
                                 size="sm"
