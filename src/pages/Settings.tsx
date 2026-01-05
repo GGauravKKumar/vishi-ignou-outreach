@@ -3,7 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { Mail, Eye, EyeOff, Check, Loader2 } from "lucide-react";
+import { Mail, Eye, EyeOff, Check, Loader2, Wifi, WifiOff, Send } from "lucide-react";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
@@ -18,6 +18,8 @@ export default function Settings() {
   const [showPassword, setShowPassword] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
   useEffect(() => {
     fetchSmtpConfig();
@@ -47,6 +49,7 @@ export default function Settings() {
     }
 
     setSaving(true);
+    setTestResult(null);
 
     // Check if config exists
     const { data: existing } = await supabase
@@ -87,6 +90,37 @@ export default function Settings() {
     }
 
     setSaving(false);
+  };
+
+  const handleTestConnection = async (sendTestEmail: boolean = false) => {
+    setTesting(true);
+    setTestResult(null);
+
+    try {
+      const { data, error } = await supabase.functions.invoke("test-smtp", {
+        body: { sendTestEmail },
+      });
+
+      if (error) {
+        setTestResult({ success: false, message: error.message });
+        toast.error("Connection test failed: " + error.message);
+      } else if (data.success) {
+        setTestResult({ success: true, message: data.message });
+        toast.success(data.message);
+      } else {
+        const message = data.suggestion 
+          ? `${data.error}. ${data.suggestion}`
+          : data.error;
+        setTestResult({ success: false, message });
+        toast.error(message);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setTestResult({ success: false, message });
+      toast.error("Test failed: " + message);
+    }
+
+    setTesting(false);
   };
 
   if (loading) {
@@ -195,24 +229,78 @@ export default function Settings() {
                 />
               </div>
             </div>
+
+            {/* Test Result Display */}
+            {testResult && (
+              <div className={`p-3 rounded-lg flex items-start gap-2 ${
+                testResult.success 
+                  ? "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400" 
+                  : "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"
+              }`}>
+                {testResult.success ? (
+                  <Wifi className="h-5 w-5 mt-0.5 shrink-0" />
+                ) : (
+                  <WifiOff className="h-5 w-5 mt-0.5 shrink-0" />
+                )}
+                <p className="text-sm">{testResult.message}</p>
+              </div>
+            )}
             
-            <Button 
-              className="gradient-primary" 
-              onClick={handleSaveSettings}
-              disabled={saving}
-            >
-              {saving ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Saving...
-                </>
-              ) : (
-                <>
-                  <Check className="mr-2 h-4 w-4" />
-                  Save Settings
-                </>
-              )}
-            </Button>
+            <div className="flex flex-wrap gap-3">
+              <Button 
+                className="gradient-primary" 
+                onClick={handleSaveSettings}
+                disabled={saving}
+              >
+                {saving ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <Check className="mr-2 h-4 w-4" />
+                    Save Settings
+                  </>
+                )}
+              </Button>
+
+              <Button 
+                variant="outline"
+                onClick={() => handleTestConnection(false)}
+                disabled={testing}
+              >
+                {testing ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Testing...
+                  </>
+                ) : (
+                  <>
+                    <Wifi className="mr-2 h-4 w-4" />
+                    Test Connection
+                  </>
+                )}
+              </Button>
+
+              <Button 
+                variant="secondary"
+                onClick={() => handleTestConnection(true)}
+                disabled={testing}
+              >
+                {testing ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Sending...
+                  </>
+                ) : (
+                  <>
+                    <Send className="mr-2 h-4 w-4" />
+                    Send Test Email
+                  </>
+                )}
+              </Button>
+            </div>
           </CardContent>
         </Card>
       </div>

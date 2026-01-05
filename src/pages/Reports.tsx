@@ -3,6 +3,7 @@ import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Progress } from "@/components/ui/progress";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { BarChart3, RefreshCw, CheckCircle, XCircle, Clock, ChevronDown, ChevronUp, RotateCcw, Loader2 } from "lucide-react";
@@ -235,6 +236,12 @@ export default function Reports() {
     return styles[status] || styles.draft;
   };
 
+  const getProgressPercentage = (campaign: Campaign) => {
+    if (campaign.total_recipients === 0) return 0;
+    const completed = campaign.sent_count + campaign.failed_count;
+    return Math.round((completed / campaign.total_recipients) * 100);
+  };
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
@@ -286,7 +293,16 @@ export default function Reports() {
                             </div>
                           </div>
                           <div className="flex items-center gap-4">
-                            <div className="text-right">
+                            {/* Progress Bar for sending campaigns */}
+                            {campaign.status === "sending" && (
+                              <div className="w-32 space-y-1">
+                                <Progress value={getProgressPercentage(campaign)} className="h-2" />
+                                <p className="text-xs text-center text-muted-foreground">
+                                  {getProgressPercentage(campaign)}%
+                                </p>
+                              </div>
+                            )}
+                            <div className="text-right min-w-[120px]">
                               <p className="text-sm">
                                 <span className="text-green-600 font-medium">{campaign.sent_count}</span>
                                 {" / "}
