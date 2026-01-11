@@ -6,7 +6,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Progress } from "@/components/ui/progress";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { BarChart3, RefreshCw, CheckCircle, XCircle, Clock, ChevronDown, ChevronUp, RotateCcw, Loader2 } from "lucide-react";
+import { BarChart3, RefreshCw, CheckCircle, XCircle, Clock, ChevronDown, ChevronUp, RotateCcw, Loader2, Play } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -129,6 +129,65 @@ export default function Reports() {
       setExpandedCampaign(campaignId);
       await fetchEmailLogs(campaignId);
     }
+  };
+
+  const handleResumeCampaign = async (campaign: Campaign) => {
+    if (!campaign.email_templates) {
+      toast.error("Campaign template not found");
+      return;
+    }
+    
+    setResending(campaign.id);
+    
+    try {
+      // Fetch pending email logs with student details
+      const { data: pendingLogs, error: logsError } = await supabase
+        .from("email_logs")
+        .select("student_id, recipient_email, recipient_name, students(course)")
+        .eq("campaign_id", campaign.id)
+        .eq("status", "pending");
+      
+      if (logsError || !pendingLogs || pendingLogs.length === 0) {
+        toast.info("No pending emails to resume");
+        setResending(null);
+        return;
+      }
+      
+      const recipients = pendingLogs.map(log => ({
+        id: log.student_id,
+        name: log.recipient_name,
+        email: log.recipient_email,
+        course: (log.students as { course: string } | null)?.course || "",
+      }));
+      
+      const { error } = await supabase.functions.invoke("send-campaign-emails", {
+        body: {
+          campaignId: campaign.id,
+          template: {
+            subject: campaign.email_templates.subject,
+            body: campaign.email_templates.body,
+          },
+          recipients,
+          isRetry: true,
+        },
+      });
+      
+      if (error) {
+        toast.error("Resume failed: " + error.message);
+      } else {
+        toast.success(`Resuming ${recipients.length} pending emails in background.`);
+        setEmailLogs(prev => {
+          const newLogs = { ...prev };
+          delete newLogs[campaign.id];
+          return newLogs;
+        });
+      }
+    } catch (error) {
+      console.error(error);
+      toast.error("Failed to resume campaign");
+    }
+    
+    setResending(null);
   };
 
   const handleResendFailed = async (campaign: Campaign) => {
@@ -328,6 +387,27 @@ export default function Reports() {
                                 {campaign.status}
                               </span>
                             </div>
+                            {/* Resume button for stuck campaigns */}
+                            {campaign.pending_count > 0 && campaign.status === "sending" && (
+                              <Button
+                                variant="default"
+                                size="sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleResumeCampaign(campaign);
+                                }}
+                                disabled={resending === campaign.id}
+                              >
+                                {resending === campaign.id ? (
+                                  <RefreshCw className="h-4 w-4 animate-spin" />
+                                ) : (
+                                  <>
+                                    <Play className="h-4 w-4 mr-1" />
+                                    Resume
+                                  </>
+                                )}
+                              </Button>
+                            )}
                             {campaign.failed_count > 0 && campaign.status !== "sending" && (
                               <Button
                                 variant="outline"

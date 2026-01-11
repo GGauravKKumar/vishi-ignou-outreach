@@ -22,6 +22,8 @@ interface EmailRequest {
   };
   recipients: Recipient[];
   isRetry?: boolean;
+  chunkIndex?: number;
+  totalChunks?: number;
 }
 
 const personalizeContent = (content: string, recipient: Recipient): string => {
@@ -31,12 +33,10 @@ const personalizeContent = (content: string, recipient: Recipient): string => {
     .replace(/\{\{course\}\}/gi, recipient.course);
 };
 
-// Convert bare LF to CRLF for RFC 822 compliance
 const normalizeCRLF = (content: string): string => {
   return content.replace(/\r?\n/g, "\r\n");
 };
 
-// Email validation regex
 const isValidEmail = (email: string): boolean => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
@@ -44,11 +44,15 @@ const isValidEmail = (email: string): boolean => {
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Retry configuration
-const MAX_RETRIES = 3;
-const RETRY_DELAYS = [1000, 3000, 5000]; // Exponential backoff: 1s, 3s, 5s
+// Reduced retry attempts for faster processing
+const MAX_RETRIES = 2;
+const RETRY_DELAYS = [500, 1500];
 
-// Send email with retry logic
+// CRITICAL: Smaller chunk size to avoid CPU timeout (max ~20 emails per invocation)
+const CHUNK_SIZE = 20;
+// Process emails sequentially to minimize CPU spikes
+const BATCH_SIZE = 1;
+
 async function sendEmailWithRetry(
   client: SMTPClient,
   emailConfig: { from: string; to: string; subject: string; content: string; html: string },
@@ -62,12 +66,10 @@ async function sendEmailWithRetry(
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       console.log(`[Retry] Attempt ${attempt + 1}/${MAX_RETRIES} failed for ${recipientEmail}: ${errorMessage}`);
       
-      // Check if it's a permanent failure (don't retry)
       if (errorMessage.includes("550") || errorMessage.includes("553") || errorMessage.includes("invalid")) {
         return { success: false, error: `Permanent failure: ${errorMessage}` };
       }
       
-      // If not last attempt, wait and retry
       if (attempt < MAX_RETRIES - 1) {
         await delay(RETRY_DELAYS[attempt]);
       } else {
@@ -78,11 +80,8 @@ async function sendEmailWithRetry(
   return { success: false, error: "Max retries exceeded" };
 }
 
-// Batch size for parallel processing
-const BATCH_SIZE = 5;
-
-// Background email processing function with batching and connection reuse
-async function processEmailsInBackground(
+// Process a chunk of emails (designed to complete within CPU limits)
+async function processEmailChunk(
   supabaseUrl: string,
   supabaseServiceKey: string,
   campaignId: string,
@@ -90,32 +89,16 @@ async function processEmailsInBackground(
   recipients: Recipient[],
   smtpConfig: { host: string; username: string; from_name: string; from_email: string },
   smtpPassword: string,
-  isRetry: boolean
+  chunkIndex: number,
+  totalChunks: number
 ) {
   const supabase = createClient(supabaseUrl, supabaseServiceKey);
-  console.log(`[Background] Starting email processing for campaign ${campaignId} with ${recipients.length} recipients`);
+  console.log(`[Chunk ${chunkIndex + 1}/${totalChunks}] Processing ${recipients.length} emails`);
   
   let sentCount = 0;
   let failedCount = 0;
-  let skippedCount = 0;
-  const totalRecipients = recipients.length;
 
-  // Get initial counts for retry
-  let initialSentCount = 0;
-  let initialFailedCount = 0;
-  if (isRetry) {
-    const { data: campaign } = await supabase
-      .from("campaigns")
-      .select("sent_count, failed_count")
-      .eq("id", campaignId)
-      .single();
-    if (campaign) {
-      initialSentCount = Number(campaign.sent_count) || 0;
-      initialFailedCount = Number(campaign.failed_count) || 0;
-    }
-  }
-
-  // Validate emails upfront and filter invalid ones
+  // Validate emails
   const validRecipients: Recipient[] = [];
   const invalidRecipients: Recipient[] = [];
   
@@ -124,35 +107,19 @@ async function processEmailsInBackground(
       validRecipients.push(recipient);
     } else {
       invalidRecipients.push(recipient);
-      console.log(`[Validation] Invalid email skipped: ${recipient.email}`);
     }
   }
   
-  // Mark invalid emails as failed immediately
+  // Mark invalid emails
   for (const recipient of invalidRecipients) {
     await supabase
       .from("email_logs")
-      .update({ 
-        status: "failed", 
-        error_message: "Invalid email format" 
-      })
+      .update({ status: "failed", error_message: "Invalid email format" })
       .eq("campaign_id", campaignId)
       .eq("student_id", recipient.id);
-    skippedCount++;
     failedCount++;
   }
 
-  // Update campaign to "sending" status with pending count
-  await supabase
-    .from("campaigns")
-    .update({ 
-      status: "sending",
-      pending_count: validRecipients.length,
-      failed_count: isRetry ? initialFailedCount : failedCount
-    })
-    .eq("id", campaignId);
-
-  // Create a single SMTP client for connection reuse
   let smtpClient: SMTPClient | null = null;
   
   try {
@@ -167,140 +134,134 @@ async function processEmailsInBackground(
         },
       },
     });
-    console.log(`[Background] SMTP connection established`);
+    console.log(`[Chunk ${chunkIndex + 1}] SMTP connected`);
 
-    // Process emails in batches
-    for (let batchStart = 0; batchStart < validRecipients.length; batchStart += BATCH_SIZE) {
-      const batch = validRecipients.slice(batchStart, batchStart + BATCH_SIZE);
-      console.log(`[Background] Processing batch ${Math.floor(batchStart / BATCH_SIZE) + 1} (${batch.length} emails)`);
+    // Process emails SEQUENTIALLY to minimize CPU usage
+    for (const recipient of validRecipients) {
+      const personalizedSubject = personalizeContent(template.subject, recipient);
+      const personalizedBody = personalizeContent(template.body, recipient);
+      const normalizedBody = normalizeCRLF(personalizedBody);
+      const normalizedSubject = normalizeCRLF(personalizedSubject);
+      const htmlBody = normalizedBody.replace(/\r\n/g, "<br>");
+
+      const emailConfig = {
+        from: `${smtpConfig.from_name} <${smtpConfig.from_email}>`,
+        to: recipient.email,
+        subject: normalizedSubject,
+        content: normalizedBody,
+        html: htmlBody,
+      };
+
+      const result = await sendEmailWithRetry(smtpClient, emailConfig, recipient.email);
       
-      // Process batch in parallel
-      const batchResults = await Promise.all(
-        batch.map(async (recipient) => {
-          const personalizedSubject = personalizeContent(template.subject, recipient);
-          const personalizedBody = personalizeContent(template.body, recipient);
-          const normalizedBody = normalizeCRLF(personalizedBody);
-          const normalizedSubject = normalizeCRLF(personalizedSubject);
-          const htmlBody = normalizedBody.replace(/\r\n/g, "<br>");
-
-          const emailConfig = {
-            from: `${smtpConfig.from_name} <${smtpConfig.from_email}>`,
-            to: recipient.email,
-            subject: normalizedSubject,
-            content: normalizedBody,
-            html: htmlBody,
-          };
-
-          const result = await sendEmailWithRetry(smtpClient!, emailConfig, recipient.email);
-          
-          return {
-            recipient,
-            success: result.success,
-            error: result.error,
-          };
-        })
-      );
-
-      // Update database for each result
-      for (const result of batchResults) {
-        if (result.success) {
-          await supabase
-            .from("email_logs")
-            .update({ status: "sent", sent_at: new Date().toISOString(), error_message: null })
-            .eq("campaign_id", campaignId)
-            .eq("student_id", result.recipient.id);
-          sentCount++;
-          console.log(`[Background] ✓ Email sent to ${result.recipient.email}`);
-        } else {
-          await supabase
-            .from("email_logs")
-            .update({ 
-              status: "failed", 
-              error_message: result.error || "Unknown error"
-            })
-            .eq("campaign_id", campaignId)
-            .eq("student_id", result.recipient.id);
-          failedCount++;
-          console.log(`[Background] ✗ Failed: ${result.recipient.email} - ${result.error}`);
-        }
+      if (result.success) {
+        await supabase
+          .from("email_logs")
+          .update({ status: "sent", sent_at: new Date().toISOString(), error_message: null })
+          .eq("campaign_id", campaignId)
+          .eq("student_id", recipient.id);
+        sentCount++;
+        console.log(`[Chunk ${chunkIndex + 1}] ✓ ${recipient.email}`);
+      } else {
+        await supabase
+          .from("email_logs")
+          .update({ status: "failed", error_message: result.error || "Unknown error" })
+          .eq("campaign_id", campaignId)
+          .eq("student_id", recipient.id);
+        failedCount++;
+        console.log(`[Chunk ${chunkIndex + 1}] ✗ ${recipient.email}`);
       }
 
-      // Update campaign counts after each batch (real-time updates)
-      const processedSoFar = sentCount + failedCount - skippedCount;
-      const pendingCount = validRecipients.length - processedSoFar;
-      const currentSentCount = isRetry ? initialSentCount + sentCount : sentCount;
-      const currentFailedCount = isRetry 
-        ? Math.max(0, initialFailedCount - sentCount + failedCount) 
-        : failedCount;
-
-      await supabase
+      // Update campaign progress after each email
+      const { data: currentCampaign } = await supabase
         .from("campaigns")
-        .update({ 
-          sent_count: currentSentCount,
-          failed_count: currentFailedCount,
-          pending_count: Math.max(0, pendingCount)
-        })
-        .eq("id", campaignId);
-
-      console.log(`[Background] Batch complete. Progress: ${sentCount} sent, ${failedCount} failed, ${pendingCount} pending`);
-
-      // Small delay between batches to avoid overwhelming SMTP server
-      if (batchStart + BATCH_SIZE < validRecipients.length) {
-        await delay(1000);
+        .select("sent_count, failed_count, pending_count")
+        .eq("id", campaignId)
+        .single();
+      
+      if (currentCampaign) {
+        await supabase
+          .from("campaigns")
+          .update({ 
+            sent_count: (currentCampaign.sent_count || 0) + (result.success ? 1 : 0),
+            failed_count: (currentCampaign.failed_count || 0) + (result.success ? 0 : 1),
+            pending_count: Math.max(0, (currentCampaign.pending_count || 0) - 1)
+          })
+          .eq("id", campaignId);
       }
+
+      // Small delay to spread CPU
+      await delay(100);
     }
   } catch (connectionError) {
-    console.error(`[Background] SMTP connection error:`, connectionError);
-    // Mark all remaining emails as failed
-    for (const recipient of validRecipients) {
+    console.error(`[Chunk ${chunkIndex + 1}] SMTP error:`, connectionError);
+    for (const recipient of validRecipients.slice(sentCount)) {
       await supabase
         .from("email_logs")
         .update({ 
           status: "failed", 
-          error_message: `SMTP connection error: ${connectionError instanceof Error ? connectionError.message : "Unknown"}`
+          error_message: `SMTP error: ${connectionError instanceof Error ? connectionError.message : "Unknown"}`
         })
         .eq("campaign_id", campaignId)
         .eq("student_id", recipient.id)
         .eq("status", "pending");
+      failedCount++;
     }
-    failedCount += validRecipients.length - sentCount;
   } finally {
-    // Close SMTP connection
     if (smtpClient) {
       try {
         await smtpClient.close();
-        console.log(`[Background] SMTP connection closed`);
-      } catch (closeError) {
-        console.error(`[Background] Error closing SMTP:`, closeError);
+      } catch (e) {
+        console.error("Error closing SMTP:", e);
       }
     }
   }
 
-  // Final status update
-  const finalStatus = failedCount === totalRecipients ? "failed" : 
-                      sentCount === totalRecipients ? "sent" : "partial";
+  console.log(`[Chunk ${chunkIndex + 1}] Complete: ${sentCount} sent, ${failedCount} failed`);
+  return { sentCount, failedCount };
+}
+
+// Trigger next chunk via self-invocation
+async function triggerNextChunk(
+  supabaseUrl: string,
+  supabaseServiceKey: string,
+  campaignId: string,
+  template: { subject: string; body: string },
+  allRecipients: Recipient[],
+  currentChunk: number,
+  totalChunks: number
+) {
+  const nextChunk = currentChunk + 1;
+  if (nextChunk >= totalChunks) {
+    console.log(`[Scheduler] All chunks complete for campaign ${campaignId}`);
+    return;
+  }
+
+  const startIdx = nextChunk * CHUNK_SIZE;
+  const chunkRecipients = allRecipients.slice(startIdx, startIdx + CHUNK_SIZE);
   
-  const finalSentCount = isRetry ? initialSentCount + sentCount : sentCount;
-  const finalFailedCount = isRetry 
-    ? Math.max(0, initialFailedCount - sentCount + failedCount) 
-    : failedCount;
+  console.log(`[Scheduler] Triggering chunk ${nextChunk + 1}/${totalChunks} with ${chunkRecipients.length} recipients`);
 
-  await supabase
-    .from("campaigns")
-    .update({ 
-      status: finalStatus,
-      sent_count: finalSentCount,
-      failed_count: finalFailedCount,
-      pending_count: 0,
-      sent_at: new Date().toISOString()
-    })
-    .eq("id", campaignId);
-
-  console.log(`[Background] Campaign ${campaignId} completed: ${sentCount} sent, ${failedCount} failed (${skippedCount} invalid emails)`);
+  const supabase = createClient(supabaseUrl, supabaseServiceKey);
+  
+  // Use supabase.functions.invoke for self-invocation
+  try {
+    await supabase.functions.invoke('send-campaign-emails', {
+      body: {
+        campaignId,
+        template,
+        recipients: chunkRecipients,
+        chunkIndex: nextChunk,
+        totalChunks,
+        isRetry: false
+      }
+    });
+  } catch (error) {
+    console.error(`[Scheduler] Failed to trigger next chunk:`, error);
+  }
 }
 
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
@@ -311,7 +272,6 @@ serve(async (req) => {
     const smtpPassword = Deno.env.get("SMTP_PASSWORD");
 
     if (!smtpPassword) {
-      console.error("SMTP_PASSWORD not configured");
       return new Response(
         JSON.stringify({ error: "SMTP password not configured" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -319,11 +279,11 @@ serve(async (req) => {
     }
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
+    const { campaignId, template, recipients, isRetry, chunkIndex, totalChunks }: EmailRequest = await req.json();
+    
+    const isChunkedCall = typeof chunkIndex === 'number' && typeof totalChunks === 'number';
+    console.log(`Received: campaign=${campaignId}, recipients=${recipients.length}, chunk=${chunkIndex ?? 'initial'}/${totalChunks ?? 'N/A'}`);
 
-    const { campaignId, template, recipients, isRetry }: EmailRequest = await req.json();
-    console.log(`Received campaign ${campaignId} with ${recipients.length} recipients${isRetry ? ' (RETRY)' : ''}`);
-
-    // Validate recipients count
     if (recipients.length === 0) {
       return new Response(
         JSON.stringify({ error: "No recipients provided" }),
@@ -331,7 +291,6 @@ serve(async (req) => {
       );
     }
 
-    // Get SMTP config from database
     const { data: smtpConfig, error: smtpError } = await supabase
       .from("smtp_config")
       .select("*")
@@ -339,48 +298,145 @@ serve(async (req) => {
       .single();
 
     if (smtpError || !smtpConfig) {
-      console.error("SMTP config not found:", smtpError);
       return new Response(
-        JSON.stringify({ error: "SMTP configuration not found. Please configure SMTP settings." }),
+        JSON.stringify({ error: "SMTP configuration not found" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Start background processing using EdgeRuntime.waitUntil
-    // @ts-ignore - EdgeRuntime is available in Supabase Edge Functions
-    EdgeRuntime.waitUntil(
-      processEmailsInBackground(
-        supabaseUrl,
-        supabaseServiceKey,
-        campaignId,
-        template,
-        recipients,
-        smtpConfig,
-        smtpPassword,
-        isRetry || false
-      )
-    );
+    // If this is a chunked call, process the chunk
+    if (isChunkedCall) {
+      // Process this chunk in background
+      // @ts-ignore
+      EdgeRuntime.waitUntil((async () => {
+        await processEmailChunk(
+          supabaseUrl, supabaseServiceKey, campaignId, template, recipients,
+          smtpConfig, smtpPassword, chunkIndex!, totalChunks!
+        );
 
-    // Return immediately - processing continues in background
+        // Check if more chunks needed
+        if (chunkIndex! + 1 < totalChunks!) {
+          // Calculate remaining recipients for next chunks
+          const { data: pendingLogs } = await supabase
+            .from("email_logs")
+            .select("student_id, recipient_email, recipient_name")
+            .eq("campaign_id", campaignId)
+            .eq("status", "pending");
+          
+          if (pendingLogs && pendingLogs.length > 0) {
+            // Get student details for pending emails
+            const { data: students } = await supabase
+              .from("students")
+              .select("id, name, email, course")
+              .in("id", pendingLogs.map(l => l.student_id).filter(Boolean));
+            
+            if (students && students.length > 0) {
+              const nextChunkRecipients = students.slice(0, CHUNK_SIZE);
+              await triggerNextChunk(
+                supabaseUrl, supabaseServiceKey, campaignId, template,
+                students, chunkIndex!, Math.ceil(students.length / CHUNK_SIZE) + chunkIndex! + 1
+              );
+            }
+          }
+        }
+
+        // Check if campaign is complete
+        const { data: campaign } = await supabase
+          .from("campaigns")
+          .select("pending_count, sent_count, failed_count, total_recipients")
+          .eq("id", campaignId)
+          .single();
+        
+        if (campaign && campaign.pending_count === 0) {
+          const finalStatus = campaign.failed_count === campaign.total_recipients ? "failed" : 
+                             campaign.sent_count === campaign.total_recipients ? "sent" : "partial";
+          await supabase
+            .from("campaigns")
+            .update({ status: finalStatus, sent_at: new Date().toISOString() })
+            .eq("id", campaignId);
+          console.log(`[Complete] Campaign ${campaignId} finished with status: ${finalStatus}`);
+        }
+      })());
+
+      return new Response(
+        JSON.stringify({ success: true, message: `Processing chunk ${chunkIndex! + 1}/${totalChunks}` }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // INITIAL CALL: Split into chunks and start first chunk
+    const calculatedTotalChunks = Math.ceil(recipients.length / CHUNK_SIZE);
+    const firstChunkRecipients = recipients.slice(0, CHUNK_SIZE);
+    
+    console.log(`[Initial] Splitting ${recipients.length} recipients into ${calculatedTotalChunks} chunks of ${CHUNK_SIZE}`);
+
+    // Set initial campaign status
+    await supabase
+      .from("campaigns")
+      .update({ 
+        status: "sending",
+        pending_count: recipients.length,
+        sent_count: isRetry ? undefined : 0,
+        failed_count: isRetry ? undefined : 0
+      })
+      .eq("id", campaignId);
+
+    // Process first chunk in background and chain to next
+    // @ts-ignore
+    EdgeRuntime.waitUntil((async () => {
+      await processEmailChunk(
+        supabaseUrl, supabaseServiceKey, campaignId, template, firstChunkRecipients,
+        smtpConfig, smtpPassword, 0, calculatedTotalChunks
+      );
+
+      // Trigger next chunk if needed
+      if (calculatedTotalChunks > 1) {
+        const nextRecipients = recipients.slice(CHUNK_SIZE, CHUNK_SIZE * 2);
+        if (nextRecipients.length > 0) {
+          await supabase.functions.invoke('send-campaign-emails', {
+            body: {
+              campaignId,
+              template,
+              recipients: nextRecipients,
+              chunkIndex: 1,
+              totalChunks: calculatedTotalChunks,
+              isRetry: false
+            }
+          });
+        }
+      } else {
+        // Only one chunk, finalize
+        const { data: campaign } = await supabase
+          .from("campaigns")
+          .select("pending_count, sent_count, failed_count, total_recipients")
+          .eq("id", campaignId)
+          .single();
+        
+        if (campaign && campaign.pending_count === 0) {
+          const finalStatus = campaign.failed_count === campaign.total_recipients ? "failed" : 
+                             campaign.sent_count === campaign.total_recipients ? "sent" : "partial";
+          await supabase
+            .from("campaigns")
+            .update({ status: finalStatus, sent_at: new Date().toISOString() })
+            .eq("id", campaignId);
+        }
+      }
+    })());
+
     return new Response(
       JSON.stringify({ 
         success: true, 
-        message: "Campaign started. Emails are being sent in the background.",
-        totalRecipients: recipients.length
+        message: `Campaign started. Processing ${recipients.length} emails in ${calculatedTotalChunks} chunks.`,
+        totalRecipients: recipients.length,
+        chunks: calculatedTotalChunks
       }),
-      { 
-        status: 200, 
-        headers: { ...corsHeaders, "Content-Type": "application/json" } 
-      }
+      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (error) {
     console.error("Campaign error:", error);
     return new Response(
       JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
-      { 
-        status: 500, 
-        headers: { ...corsHeaders, "Content-Type": "application/json" } 
-      }
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
 });
