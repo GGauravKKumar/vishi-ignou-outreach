@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.test-smtp]
 verify_jwt = false
+
+[functions.resume-stuck-campaigns]
+verify_jwt = false
