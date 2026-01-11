@@ -53,6 +53,19 @@ const CHUNK_SIZE = 20;
 // Process emails sequentially to minimize CPU spikes
 const BATCH_SIZE = 1;
 
+// 2 minute timeout for individual email send operations
+const EMAIL_TIMEOUT_MS = 2 * 60 * 1000;
+
+// Wrapper to add timeout to any promise
+function withTimeout<T>(promise: Promise<T>, ms: number, errorMessage: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => 
+      setTimeout(() => reject(new Error(errorMessage)), ms)
+    )
+  ]);
+}
+
 async function sendEmailWithRetry(
   client: SMTPClient,
   emailConfig: { from: string; to: string; subject: string; content: string; html: string },
@@ -60,14 +73,30 @@ async function sendEmailWithRetry(
 ): Promise<{ success: boolean; error?: string }> {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      await client.send(emailConfig);
+      // Add 2 minute timeout to email send operation
+      await withTimeout(
+        client.send(emailConfig),
+        EMAIL_TIMEOUT_MS,
+        `Email send timed out after 2 minutes for ${recipientEmail}`
+      );
       return { success: true };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       console.log(`[Retry] Attempt ${attempt + 1}/${MAX_RETRIES} failed for ${recipientEmail}: ${errorMessage}`);
       
+      // Permanent failures - don't retry
       if (errorMessage.includes("550") || errorMessage.includes("553") || errorMessage.includes("invalid")) {
         return { success: false, error: `Permanent failure: ${errorMessage}` };
+      }
+      
+      // Timeout - skip after one retry
+      if (errorMessage.includes("timed out")) {
+        if (attempt === 0) {
+          console.log(`[Timeout] Retrying ${recipientEmail} once after timeout`);
+          await delay(1000);
+          continue;
+        }
+        return { success: false, error: `Skipped: ${errorMessage}` };
       }
       
       if (attempt < MAX_RETRIES - 1) {
