@@ -59,16 +59,45 @@ export default function Campaigns() {
     fetchData();
   }, []);
 
+  const fetchAllStudents = async (): Promise<Student[]> => {
+    const allStudents: Student[] = [];
+    const pageSize = 1000;
+    let page = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      const { data, error } = await supabase
+        .from("students")
+        .select("*")
+        .order("name")
+        .range(page * pageSize, (page + 1) * pageSize - 1);
+
+      if (error) {
+        toast.error("Failed to fetch students");
+        break;
+      }
+
+      if (data && data.length > 0) {
+        allStudents.push(...data);
+        hasMore = data.length === pageSize;
+        page++;
+      } else {
+        hasMore = false;
+      }
+    }
+
+    return allStudents;
+  };
+
   const fetchData = async () => {
-    const [studentsRes, templatesRes] = await Promise.all([
-      supabase.from("students").select("*").order("name"),
+    const [allStudents, templatesRes] = await Promise.all([
+      fetchAllStudents(),
       supabase.from("email_templates").select("*").order("name"),
     ]);
 
-    if (studentsRes.error) toast.error("Failed to fetch students");
     if (templatesRes.error) toast.error("Failed to fetch templates");
 
-    setStudents(studentsRes.data || []);
+    setStudents(allStudents);
     setTemplates(templatesRes.data || []);
     setLoading(false);
   };
