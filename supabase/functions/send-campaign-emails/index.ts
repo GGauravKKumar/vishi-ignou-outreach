@@ -7,6 +7,16 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// ============================================================================
+// RFC 5322 COMPLIANT EMAIL SERVICE
+// ============================================================================
+// This module enforces strict RFC 5322 compliance for Gmail deliverability:
+// - Mandatory headers: From, To, Subject, Date, Message-ID
+// - Proper MIME formatting
+// - Subject validation (blocks empty subjects)
+// - Email address validation
+// ============================================================================
+
 interface Recipient {
   id: string;
   name: string;
@@ -26,37 +36,160 @@ interface EmailRequest {
   totalChunks?: number;
 }
 
+interface SmtpConfig {
+  host: string;
+  port: number;
+  username: string;
+  from_name: string;
+  from_email: string;
+}
+
+interface EmailValidationResult {
+  valid: boolean;
+  errors: string[];
+}
+
+// ============================================================================
+// EMAIL VALIDATION UTILITIES
+// ============================================================================
+
+/**
+ * Validates email address format per RFC 5322
+ */
+function isValidEmail(email: string): boolean {
+  if (!email || typeof email !== 'string') return false;
+  const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+  return emailRegex.test(email.trim()) && email.length <= 254;
+}
+
+/**
+ * Validates subject line - blocks empty subjects
+ */
+function isValidSubject(subject: string): boolean {
+  if (!subject || typeof subject !== 'string') return false;
+  const trimmed = subject.trim();
+  return trimmed.length > 0 && trimmed.length <= 998; // RFC 5322 line limit
+}
+
+/**
+ * Validates From address
+ */
+function isValidFromAddress(fromName: string, fromEmail: string): boolean {
+  if (!fromEmail || !isValidEmail(fromEmail)) return false;
+  return true;
+}
+
+/**
+ * Comprehensive email validation before sending
+ */
+function validateEmailConfig(
+  fromName: string,
+  fromEmail: string,
+  toEmail: string,
+  subject: string
+): EmailValidationResult {
+  const errors: string[] = [];
+
+  if (!isValidFromAddress(fromName, fromEmail)) {
+    errors.push(`Invalid From address: ${fromEmail}`);
+  }
+
+  if (!isValidEmail(toEmail)) {
+    errors.push(`Invalid To address: ${toEmail}`);
+  }
+
+  if (!isValidSubject(subject)) {
+    errors.push(`Invalid or empty Subject: "${subject}"`);
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors
+  };
+}
+
+/**
+ * Generates RFC 5322 compliant Message-ID
+ */
+function generateMessageId(domain: string): string {
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).substring(2, 15);
+  return `<${timestamp}.${random}@${domain}>`;
+}
+
+/**
+ * Formats RFC 5322 compliant Date header
+ */
+function formatRFC5322Date(): string {
+  const now = new Date();
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  
+  const dayName = days[now.getUTCDay()];
+  const day = now.getUTCDate().toString().padStart(2, '0');
+  const month = months[now.getUTCMonth()];
+  const year = now.getUTCFullYear();
+  const hours = now.getUTCHours().toString().padStart(2, '0');
+  const minutes = now.getUTCMinutes().toString().padStart(2, '0');
+  const seconds = now.getUTCSeconds().toString().padStart(2, '0');
+  
+  return `${dayName}, ${day} ${month} ${year} ${hours}:${minutes}:${seconds} +0000`;
+}
+
+/**
+ * Extracts domain from email address
+ */
+function extractDomain(email: string): string {
+  const parts = email.split('@');
+  return parts.length > 1 ? parts[1] : 'localhost';
+}
+
+/**
+ * Encodes subject for RFC 2047 (handles special characters)
+ */
+function encodeSubjectRFC2047(subject: string): string {
+  // Check if subject contains non-ASCII characters
+  const hasNonAscii = /[^\x00-\x7F]/.test(subject);
+  if (hasNonAscii) {
+    // Use Base64 encoding for non-ASCII
+    const encoded = btoa(unescape(encodeURIComponent(subject)));
+    return `=?UTF-8?B?${encoded}?=`;
+  }
+  return subject;
+}
+
+// ============================================================================
+// CONTENT PROCESSING
+// ============================================================================
+
 const personalizeContent = (content: string, recipient: Recipient): string => {
+  if (!content) return '';
   return content
-    .replace(/\{\{name\}\}/gi, recipient.name)
-    .replace(/\{\{email\}\}/gi, recipient.email)
-    .replace(/\{\{course\}\}/gi, recipient.course);
+    .replace(/\{\{name\}\}/gi, recipient.name || '')
+    .replace(/\{\{email\}\}/gi, recipient.email || '')
+    .replace(/\{\{course\}\}/gi, recipient.course || '');
 };
 
 const normalizeCRLF = (content: string): string => {
+  if (!content) return '';
   return content.replace(/\r?\n/g, "\r\n");
-};
-
-const isValidEmail = (email: string): boolean => {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return emailRegex.test(email);
 };
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Reduced retry attempts for faster processing
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
 const MAX_RETRIES = 2;
 const RETRY_DELAYS = [500, 1500];
-
-// CRITICAL: Smaller chunk size to avoid CPU timeout (max ~20 emails per invocation)
 const CHUNK_SIZE = 20;
-// Process emails sequentially to minimize CPU spikes
-const BATCH_SIZE = 1;
+const EMAIL_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
 
-// 2 minute timeout for individual email send operations
-const EMAIL_TIMEOUT_MS = 2 * 60 * 1000;
+// ============================================================================
+// TIMEOUT WRAPPER
+// ============================================================================
 
-// Wrapper to add timeout to any promise
 function withTimeout<T>(promise: Promise<T>, ms: number, errorMessage: string): Promise<T> {
   return Promise.race([
     promise,
@@ -66,26 +199,61 @@ function withTimeout<T>(promise: Promise<T>, ms: number, errorMessage: string): 
   ]);
 }
 
+// ============================================================================
+// EMAIL SENDING WITH RETRY
+// ============================================================================
+
+interface RFC5322EmailConfig {
+  from: string;
+  to: string;
+  subject: string;
+  content: string;
+  html: string;
+  date: string;
+  messageId: string;
+  mimeVersion: string;
+}
+
 async function sendEmailWithRetry(
   client: SMTPClient,
-  emailConfig: { from: string; to: string; subject: string; content: string; html: string },
+  emailConfig: RFC5322EmailConfig,
   recipientEmail: string
 ): Promise<{ success: boolean; error?: string }> {
+  
+  // Log the email configuration for debugging
+  console.log(`[Email] Sending to ${recipientEmail} with From: ${emailConfig.from}, Subject: ${emailConfig.subject.substring(0, 50)}...`);
+  
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      // Add 2 minute timeout to email send operation
+      // Build the email with all RFC 5322 required headers
+      // The denomailer library requires these fields in a specific format
       await withTimeout(
-        client.send(emailConfig),
+        client.send({
+          from: emailConfig.from,
+          to: emailConfig.to,
+          subject: emailConfig.subject,
+          content: emailConfig.content,
+          html: emailConfig.html,
+          // Additional headers passed through the library's mechanism
+          date: emailConfig.date,
+          headers: {
+            "Message-ID": emailConfig.messageId,
+            "MIME-Version": emailConfig.mimeVersion,
+            "X-Mailer": "Campaign-Mailer/1.0",
+          }
+        }),
         EMAIL_TIMEOUT_MS,
         `Email send timed out after 2 minutes for ${recipientEmail}`
       );
+      
+      console.log(`[Email] ✓ Successfully sent to ${recipientEmail}`);
       return { success: true };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       console.log(`[Retry] Attempt ${attempt + 1}/${MAX_RETRIES} failed for ${recipientEmail}: ${errorMessage}`);
       
       // Permanent failures - don't retry
-      if (errorMessage.includes("550") || errorMessage.includes("553") || errorMessage.includes("invalid")) {
+      if (errorMessage.includes("550") || errorMessage.includes("553") || errorMessage.includes("invalid") || errorMessage.includes("RFC")) {
         return { success: false, error: `Permanent failure: ${errorMessage}` };
       }
       
@@ -109,14 +277,17 @@ async function sendEmailWithRetry(
   return { success: false, error: "Max retries exceeded" };
 }
 
-// Process a chunk of emails (designed to complete within CPU limits)
+// ============================================================================
+// CHUNK PROCESSING
+// ============================================================================
+
 async function processEmailChunk(
   supabaseUrl: string,
   supabaseServiceKey: string,
   campaignId: string,
   template: { subject: string; body: string },
   recipients: Recipient[],
-  smtpConfig: { host: string; username: string; from_name: string; from_email: string },
+  smtpConfig: SmtpConfig,
   smtpPassword: string,
   chunkIndex: number,
   totalChunks: number
@@ -127,7 +298,51 @@ async function processEmailChunk(
   let sentCount = 0;
   let failedCount = 0;
 
-  // Validate emails
+  // Validate SMTP config
+  if (!isValidFromAddress(smtpConfig.from_name, smtpConfig.from_email)) {
+    console.error(`[Chunk ${chunkIndex + 1}] Invalid From address in SMTP config: ${smtpConfig.from_email}`);
+    // Mark all as failed
+    for (const recipient of recipients) {
+      await supabase
+        .from("email_logs")
+        .update({ status: "failed", error_message: "Invalid From address configuration" })
+        .eq("campaign_id", campaignId)
+        .eq("student_id", recipient.id);
+    }
+    return { sentCount: 0, failedCount: recipients.length };
+  }
+
+  // Validate template subject
+  if (!isValidSubject(template.subject)) {
+    console.error(`[Chunk ${chunkIndex + 1}] BLOCKING: Empty or invalid subject in template`);
+    for (const recipient of recipients) {
+      await supabase
+        .from("email_logs")
+        .update({ status: "failed", error_message: "Email blocked: Empty subject not allowed" })
+        .eq("campaign_id", campaignId)
+        .eq("student_id", recipient.id);
+      
+      // Update campaign counts
+      const { data: currentCampaign } = await supabase
+        .from("campaigns")
+        .select("failed_count, pending_count")
+        .eq("id", campaignId)
+        .single();
+      
+      if (currentCampaign) {
+        await supabase
+          .from("campaigns")
+          .update({ 
+            failed_count: (currentCampaign.failed_count || 0) + 1,
+            pending_count: Math.max(0, (currentCampaign.pending_count || 0) - 1)
+          })
+          .eq("id", campaignId);
+      }
+    }
+    return { sentCount: 0, failedCount: recipients.length };
+  }
+
+  // Separate valid and invalid recipients
   const validRecipients: Recipient[] = [];
   const invalidRecipients: Recipient[] = [];
   
@@ -147,15 +362,39 @@ async function processEmailChunk(
       .eq("campaign_id", campaignId)
       .eq("student_id", recipient.id);
     failedCount++;
+    
+    // Update campaign counts
+    const { data: currentCampaign } = await supabase
+      .from("campaigns")
+      .select("failed_count, pending_count")
+      .eq("id", campaignId)
+      .single();
+    
+    if (currentCampaign) {
+      await supabase
+        .from("campaigns")
+        .update({ 
+          failed_count: (currentCampaign.failed_count || 0) + 1,
+          pending_count: Math.max(0, (currentCampaign.pending_count || 0) - 1)
+        })
+        .eq("id", campaignId);
+    }
+  }
+
+  if (validRecipients.length === 0) {
+    console.log(`[Chunk ${chunkIndex + 1}] No valid recipients to process`);
+    return { sentCount, failedCount };
   }
 
   let smtpClient: SMTPClient | null = null;
+  const fromDomain = extractDomain(smtpConfig.from_email);
   
   try {
+    // Connect with authenticated SMTP
     smtpClient = new SMTPClient({
       connection: {
         hostname: smtpConfig.host,
-        port: 465,
+        port: smtpConfig.port || 465,
         tls: true,
         auth: {
           username: smtpConfig.username,
@@ -163,35 +402,84 @@ async function processEmailChunk(
         },
       },
     });
-    console.log(`[Chunk ${chunkIndex + 1}] SMTP connected`);
+    console.log(`[Chunk ${chunkIndex + 1}] SMTP connected to ${smtpConfig.host}:${smtpConfig.port || 465} (TLS)`);
 
-    // Process emails SEQUENTIALLY to minimize CPU usage
+    // Process emails SEQUENTIALLY
     for (const recipient of validRecipients) {
-      const personalizedSubject = personalizeContent(template.subject, recipient) || "No Subject";
+      // Personalize content
+      const personalizedSubject = personalizeContent(template.subject, recipient);
       const personalizedBody = personalizeContent(template.body, recipient);
+      
+      // Final validation of personalized subject
+      if (!isValidSubject(personalizedSubject)) {
+        console.log(`[Chunk ${chunkIndex + 1}] BLOCKING: Empty subject after personalization for ${recipient.email}`);
+        await supabase
+          .from("email_logs")
+          .update({ status: "failed", error_message: "Email blocked: Subject became empty after personalization" })
+          .eq("campaign_id", campaignId)
+          .eq("student_id", recipient.id);
+        failedCount++;
+        continue;
+      }
+
+      // Normalize content
       const normalizedBody = normalizeCRLF(personalizedBody);
-      const normalizedSubject = normalizeCRLF(personalizedSubject);
       const htmlBody = normalizedBody.replace(/\r\n/g, "<br>");
 
-      // Ensure subject is never empty
-      const finalSubject = normalizedSubject.trim() || "No Subject";
-      const fromAddress = `${smtpConfig.from_name} <${smtpConfig.from_email}>`;
-      
-      const emailConfig = {
+      // Build RFC 5322 compliant From address
+      // Format: "Display Name" <email@domain.com>
+      const fromAddress = smtpConfig.from_name 
+        ? `"${smtpConfig.from_name.replace(/"/g, '\\"')}" <${smtpConfig.from_email}>`
+        : smtpConfig.from_email;
+
+      // Build RFC 5322 compliant email config
+      const emailConfig: RFC5322EmailConfig = {
         from: fromAddress,
         to: recipient.email,
-        subject: finalSubject,
+        subject: encodeSubjectRFC2047(personalizedSubject.trim()),
         content: normalizedBody,
         html: htmlBody,
-        headers: {
-          "From": fromAddress,
-          "To": recipient.email,
-          "Subject": finalSubject,
-          "MIME-Version": "1.0",
-          "Content-Type": "text/html; charset=UTF-8",
-        },
+        date: formatRFC5322Date(),
+        messageId: generateMessageId(fromDomain),
+        mimeVersion: "1.0"
       };
 
+      // Validate complete email configuration
+      const validation = validateEmailConfig(
+        smtpConfig.from_name,
+        smtpConfig.from_email,
+        recipient.email,
+        personalizedSubject
+      );
+
+      if (!validation.valid) {
+        console.log(`[Chunk ${chunkIndex + 1}] Validation failed for ${recipient.email}: ${validation.errors.join(', ')}`);
+        await supabase
+          .from("email_logs")
+          .update({ status: "failed", error_message: `Validation: ${validation.errors.join(', ')}` })
+          .eq("campaign_id", campaignId)
+          .eq("student_id", recipient.id);
+        failedCount++;
+        
+        const { data: currentCampaign } = await supabase
+          .from("campaigns")
+          .select("failed_count, pending_count")
+          .eq("id", campaignId)
+          .single();
+        
+        if (currentCampaign) {
+          await supabase
+            .from("campaigns")
+            .update({ 
+              failed_count: (currentCampaign.failed_count || 0) + 1,
+              pending_count: Math.max(0, (currentCampaign.pending_count || 0) - 1)
+            })
+            .eq("id", campaignId);
+        }
+        continue;
+      }
+
+      // Send email with retry
       const result = await sendEmailWithRetry(smtpClient, emailConfig, recipient.email);
       
       if (result.success) {
@@ -209,10 +497,10 @@ async function processEmailChunk(
           .eq("campaign_id", campaignId)
           .eq("student_id", recipient.id);
         failedCount++;
-        console.log(`[Chunk ${chunkIndex + 1}] ✗ ${recipient.email}`);
+        console.log(`[Chunk ${chunkIndex + 1}] ✗ ${recipient.email}: ${result.error}`);
       }
 
-      // Update campaign progress after each email
+      // Update campaign progress
       const { data: currentCampaign } = await supabase
         .from("campaigns")
         .select("sent_count, failed_count, pending_count")
@@ -230,17 +518,17 @@ async function processEmailChunk(
           .eq("id", campaignId);
       }
 
-      // Small delay to spread CPU
+      // Small delay between emails
       await delay(100);
     }
   } catch (connectionError) {
-    console.error(`[Chunk ${chunkIndex + 1}] SMTP error:`, connectionError);
+    console.error(`[Chunk ${chunkIndex + 1}] SMTP connection error:`, connectionError);
     for (const recipient of validRecipients.slice(sentCount)) {
       await supabase
         .from("email_logs")
         .update({ 
           status: "failed", 
-          error_message: `SMTP error: ${connectionError instanceof Error ? connectionError.message : "Unknown"}`
+          error_message: `SMTP error: ${connectionError instanceof Error ? connectionError.message : "Connection failed"}`
         })
         .eq("campaign_id", campaignId)
         .eq("student_id", recipient.id)
@@ -251,6 +539,7 @@ async function processEmailChunk(
     if (smtpClient) {
       try {
         await smtpClient.close();
+        console.log(`[Chunk ${chunkIndex + 1}] SMTP connection closed`);
       } catch (e) {
         console.error("Error closing SMTP:", e);
       }
@@ -261,7 +550,10 @@ async function processEmailChunk(
   return { sentCount, failedCount };
 }
 
-// Trigger next chunk via self-invocation
+// ============================================================================
+// CHUNK SCHEDULING
+// ============================================================================
+
 async function triggerNextChunk(
   supabaseUrl: string,
   supabaseServiceKey: string,
@@ -284,7 +576,6 @@ async function triggerNextChunk(
 
   const supabase = createClient(supabaseUrl, supabaseServiceKey);
   
-  // Use supabase.functions.invoke for self-invocation
   try {
     await supabase.functions.invoke('send-campaign-emails', {
       body: {
@@ -301,6 +592,10 @@ async function triggerNextChunk(
   }
 }
 
+// ============================================================================
+// MAIN HTTP HANDLER
+// ============================================================================
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -312,6 +607,7 @@ serve(async (req) => {
     const smtpPassword = Deno.env.get("SMTP_PASSWORD");
 
     if (!smtpPassword) {
+      console.error("[Error] SMTP password not configured");
       return new Response(
         JSON.stringify({ error: "SMTP password not configured" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -321,8 +617,28 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
     const { campaignId, template, recipients, isRetry, chunkIndex, totalChunks }: EmailRequest = await req.json();
     
-    const isChunkedCall = typeof chunkIndex === 'number' && typeof totalChunks === 'number';
-    console.log(`Received: campaign=${campaignId}, recipients=${recipients.length}, chunk=${chunkIndex ?? 'initial'}/${totalChunks ?? 'N/A'}`);
+    console.log(`[Request] Campaign: ${campaignId}, Recipients: ${recipients.length}, Chunk: ${chunkIndex ?? 'initial'}/${totalChunks ?? 'N/A'}`);
+
+    // ========== VALIDATION BEFORE SENDING ==========
+    
+    // Validate template subject BEFORE processing
+    if (!template || !isValidSubject(template.subject)) {
+      console.error(`[Error] BLOCKING CAMPAIGN: Empty or invalid template subject`);
+      
+      // Mark campaign as failed
+      await supabase
+        .from("campaigns")
+        .update({ 
+          status: "failed",
+          sent_at: new Date().toISOString()
+        })
+        .eq("id", campaignId);
+      
+      return new Response(
+        JSON.stringify({ error: "Campaign blocked: Template subject cannot be empty" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     if (recipients.length === 0) {
       return new Response(
@@ -331,6 +647,7 @@ serve(async (req) => {
       );
     }
 
+    // Get SMTP config
     const { data: smtpConfig, error: smtpError } = await supabase
       .from("smtp_config")
       .select("*")
@@ -338,15 +655,28 @@ serve(async (req) => {
       .single();
 
     if (smtpError || !smtpConfig) {
+      console.error("[Error] SMTP configuration not found:", smtpError);
       return new Response(
         JSON.stringify({ error: "SMTP configuration not found" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // If this is a chunked call, process the chunk
+    // Validate SMTP From address
+    if (!isValidFromAddress(smtpConfig.from_name, smtpConfig.from_email)) {
+      console.error(`[Error] Invalid From address in SMTP config: ${smtpConfig.from_email}`);
+      return new Response(
+        JSON.stringify({ error: "Invalid From email address in SMTP configuration" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    console.log(`[Config] SMTP: ${smtpConfig.host}, From: "${smtpConfig.from_name}" <${smtpConfig.from_email}>`);
+
+    const isChunkedCall = typeof chunkIndex === 'number' && typeof totalChunks === 'number';
+
+    // ========== CHUNKED CALL PROCESSING ==========
     if (isChunkedCall) {
-      // Process this chunk in background
       // @ts-ignore
       EdgeRuntime.waitUntil((async () => {
         await processEmailChunk(
@@ -356,22 +686,19 @@ serve(async (req) => {
 
         // Check if more chunks needed
         if (chunkIndex! + 1 < totalChunks!) {
-          // Calculate remaining recipients for next chunks
           const { data: pendingLogs } = await supabase
             .from("email_logs")
-            .select("student_id, recipient_email, recipient_name")
+            .select("student_id")
             .eq("campaign_id", campaignId)
             .eq("status", "pending");
           
           if (pendingLogs && pendingLogs.length > 0) {
-            // Get student details for pending emails
             const { data: students } = await supabase
               .from("students")
               .select("id, name, email, course")
               .in("id", pendingLogs.map(l => l.student_id).filter(Boolean));
             
             if (students && students.length > 0) {
-              const nextChunkRecipients = students.slice(0, CHUNK_SIZE);
               await triggerNextChunk(
                 supabaseUrl, supabaseServiceKey, campaignId, template,
                 students, chunkIndex!, Math.ceil(students.length / CHUNK_SIZE) + chunkIndex! + 1
@@ -404,7 +731,7 @@ serve(async (req) => {
       );
     }
 
-    // INITIAL CALL: Split into chunks and start first chunk
+    // ========== INITIAL CALL - SPLIT INTO CHUNKS ==========
     const calculatedTotalChunks = Math.ceil(recipients.length / CHUNK_SIZE);
     const firstChunkRecipients = recipients.slice(0, CHUNK_SIZE);
     
@@ -421,7 +748,7 @@ serve(async (req) => {
       })
       .eq("id", campaignId);
 
-    // Process first chunk in background and chain to next
+    // Process first chunk in background
     // @ts-ignore
     EdgeRuntime.waitUntil((async () => {
       await processEmailChunk(
@@ -468,12 +795,13 @@ serve(async (req) => {
         success: true, 
         message: `Campaign started. Processing ${recipients.length} emails in ${calculatedTotalChunks} chunks.`,
         totalRecipients: recipients.length,
-        chunks: calculatedTotalChunks
+        chunks: calculatedTotalChunks,
+        smtpFrom: `${smtpConfig.from_name} <${smtpConfig.from_email}>`
       }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (error) {
-    console.error("Campaign error:", error);
+    console.error("[Error] Campaign error:", error);
     return new Response(
       JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
