@@ -64,17 +64,34 @@ export default function Students() {
 
   const fetchStudents = async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from("students")
-      .select("*")
-      .order("created_at", { ascending: false });
+    const allStudents: Student[] = [];
+    const pageSize = 1000;
+    let page = 0;
+    let hasMore = true;
 
-    if (error) {
-      toast.error("Failed to fetch students");
-      console.error(error);
-    } else {
-      setStudents(data || []);
+    while (hasMore) {
+      const { data, error } = await supabase
+        .from("students")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .range(page * pageSize, (page + 1) * pageSize - 1);
+
+      if (error) {
+        toast.error("Failed to fetch students");
+        console.error(error);
+        break;
+      }
+
+      if (data && data.length > 0) {
+        allStudents.push(...data);
+        hasMore = data.length === pageSize;
+        page++;
+      } else {
+        hasMore = false;
+      }
     }
+
+    setStudents(allStudents);
     setLoading(false);
   };
 

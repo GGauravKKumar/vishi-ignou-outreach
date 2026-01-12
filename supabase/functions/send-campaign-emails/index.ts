@@ -167,23 +167,26 @@ async function processEmailChunk(
 
     // Process emails SEQUENTIALLY to minimize CPU usage
     for (const recipient of validRecipients) {
-      const personalizedSubject = personalizeContent(template.subject, recipient);
+      const personalizedSubject = personalizeContent(template.subject, recipient) || "No Subject";
       const personalizedBody = personalizeContent(template.body, recipient);
       const normalizedBody = normalizeCRLF(personalizedBody);
       const normalizedSubject = normalizeCRLF(personalizedSubject);
       const htmlBody = normalizedBody.replace(/\r\n/g, "<br>");
 
+      // Ensure subject is never empty
+      const finalSubject = normalizedSubject.trim() || "No Subject";
       const fromAddress = `${smtpConfig.from_name} <${smtpConfig.from_email}>`;
+      
       const emailConfig = {
         from: fromAddress,
         to: recipient.email,
-        subject: normalizedSubject,
+        subject: finalSubject,
         content: normalizedBody,
         html: htmlBody,
         headers: {
           "From": fromAddress,
           "To": recipient.email,
-          "Subject": normalizedSubject,
+          "Subject": finalSubject,
           "MIME-Version": "1.0",
           "Content-Type": "text/html; charset=UTF-8",
         },
