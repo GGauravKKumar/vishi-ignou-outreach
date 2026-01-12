@@ -173,12 +173,20 @@ async function processEmailChunk(
       const normalizedSubject = normalizeCRLF(personalizedSubject);
       const htmlBody = normalizedBody.replace(/\r\n/g, "<br>");
 
+      const fromAddress = `${smtpConfig.from_name} <${smtpConfig.from_email}>`;
       const emailConfig = {
-        from: `${smtpConfig.from_name} <${smtpConfig.from_email}>`,
+        from: fromAddress,
         to: recipient.email,
         subject: normalizedSubject,
         content: normalizedBody,
         html: htmlBody,
+        headers: {
+          "From": fromAddress,
+          "To": recipient.email,
+          "Subject": normalizedSubject,
+          "MIME-Version": "1.0",
+          "Content-Type": "text/html; charset=UTF-8",
+        },
       };
 
       const result = await sendEmailWithRetry(smtpClient, emailConfig, recipient.email);
