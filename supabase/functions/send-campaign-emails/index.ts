@@ -51,23 +51,6 @@ interface EmailValidationResult {
 }
 
 
-//New Here Manual
-
-const client = new SMTPClient({
-  connection: {
-    hostname: "smtp.secureserver.net",
-    port: 587,
-    tls: false,
-    auth: {
-      username: "ignouhelp@vishiignouservices.in",
-      password: smtpPassword,
-    },
-  },
-});
-
-//Till Here
-
-
 // ============================================================================
 // EMAIL VALIDATION UTILITIES
 // ============================================================================
@@ -201,7 +184,7 @@ function buildFromAddress(fromName: string | undefined, fromEmail: string): stri
     throw new Error('From email address is required');
   }
   
-  const cleanEmail = fromEmail;//.trim();
+  const cleanEmail = fromEmail.trim();
   
   if (fromName && fromName.trim()) {
     // Escape quotes in display name and wrap in quotes
@@ -209,7 +192,7 @@ function buildFromAddress(fromName: string | undefined, fromEmail: string): stri
     return `"${cleanName}" <${cleanEmail}>`;
   }
   
-  return cleanEmail;
+  return `<${cleanEmail}>`;
 }
 
 /**
@@ -224,7 +207,7 @@ function buildToAddress(name: string | undefined, email: string): string {
     return `"${cleanName}" <${cleanEmail}>`;
   }
   
-  return cleanEmail;
+  return `<${cleanEmail}>`;
 }
 
 // ============================================================================
@@ -308,6 +291,7 @@ async function sendEmailWithRetry(
   html: htmlContent,
   date: dateHeader,
   headers: {
+    "From": fromAddress,
     "Message-ID": messageId,
     "MIME-Version": "1.0",
     "X-Mailer": "CampaignMailer/2.0",
