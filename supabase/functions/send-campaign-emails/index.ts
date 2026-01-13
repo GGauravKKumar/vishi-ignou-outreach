@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { SMTPClient } from "https://deno.land/x/denomailer@1.6.0/mod.ts";
+//import { SMTPClient } from "https://deno.land/x/denomailer@1.6.0/mod.ts";
+import { SMTPClient } from "https://deno.land/x/smtp@v0.7.0/mod.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -48,6 +49,24 @@ interface EmailValidationResult {
   valid: boolean;
   errors: string[];
 }
+
+
+//New Here Manual
+
+const client = new SMTPClient({
+  connection: {
+    hostname: "smtp.secureserver.net",
+    port: 587,
+    tls: false,
+    auth: {
+      username: "ignouhelp@vishiignouservices.in",
+      password: smtpPassword,
+    },
+  },
+});
+
+//Till Here
+
 
 // ============================================================================
 // EMAIL VALIDATION UTILITIES
@@ -182,7 +201,7 @@ function buildFromAddress(fromName: string | undefined, fromEmail: string): stri
     throw new Error('From email address is required');
   }
   
-  const cleanEmail = fromEmail.trim();
+  const cleanEmail = fromEmail;//.trim();
   
   if (fromName && fromName.trim()) {
     // Escape quotes in display name and wrap in quotes
