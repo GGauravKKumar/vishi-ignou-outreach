@@ -312,8 +312,6 @@ async function sendEmailWithRetry(
     "MIME-Version": "1.0",
     "X-Mailer": "CampaignMailer/2.0",
     "X-Priority": "3",
-    "List-Unsubscribe": "<mailto:unsubscribe@vishiignouservices.in>",
-
   }
 });
       
