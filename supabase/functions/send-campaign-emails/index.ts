@@ -282,31 +282,19 @@ async function sendEmailWithRetry(
     try {
       // Build email with explicit RFC 5322 headers
       // The denomailer library's send() accepts these parameters
-      await withTimeout(
-        client.send({
-          // CRITICAL: From must be properly formatted
-          from: fromAddress,
-          // To can include display name
-          to: toAddress,
-          // Subject - encoded for non-ASCII
-          subject: encodedSubject,
-          // Plain text version
-          content: textContent,
-          // HTML version
-          html: htmlContent,
-          // Explicit date header
-          date: dateHeader,
-          // Additional RFC 5322 headers
-          headers: {
-            "Message-ID": messageId,
-            "MIME-Version": "1.0",
-            "X-Mailer": "CampaignMailer/2.0",
-            "X-Priority": "3",
-          }
-        }),
-        EMAIL_TIMEOUT_MS,
-        `Email send timed out after 2 minutes for ${toEmail}`
-      );
+      await client.send({
+  from: fromAddress,
+  to: toAddress,
+  subject: encodedSubject,
+  html: htmlContent,
+  date: dateHeader,
+  headers: {
+    "Message-ID": messageId,
+    "MIME-Version": "1.0",
+    "X-Mailer": "CampaignMailer/2.0",
+    "X-Priority": "3",
+  }
+});
       
       console.log(`[Email] ✓ Successfully sent to ${toEmail}`);
       return { success: true };
