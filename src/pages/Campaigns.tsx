@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
-import { Send, Users, FileText, Eye, Mail, CheckCircle, AlertCircle } from "lucide-react";
+import { Send, Users, FileText, Eye, Mail, Search, X, Loader2 } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -42,85 +42,181 @@ interface EmailTemplate {
 
 export default function Campaigns() {
   const { user } = useAuth();
-  const [students, setStudents] = useState<Student[]>([]);
   const [templates, setTemplates] = useState<EmailTemplate[]>([]);
+  const [courses, setCourses] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
 
   const [campaignName, setCampaignName] = useState("");
   const [selectedTemplate, setSelectedTemplate] = useState<string>("");
-  const [selectedStudents, setSelectedStudents] = useState<string[]>([]);
-  const [courseFilter, setCourseFilter] = useState<string>("all");
+  const [selectedStudents, setSelectedStudents] = useState<Student[]>([]);
+  const [courseFilter, setCourseFilter] = useState<string>("");
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<Student[]>([]);
+  const [searching, setSearching] = useState(false);
+
+  // Select all by course state
+  const [selectingAll, setSelectingAll] = useState(false);
+  const [courseStudentCount, setCourseStudentCount] = useState<number>(0);
 
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewStudent, setPreviewStudent] = useState<Student | null>(null);
 
   useEffect(() => {
-    fetchData();
+    fetchInitialData();
   }, []);
 
-  const fetchAllStudents = async (): Promise<Student[]> => {
-    const allStudents: Student[] = [];
-    const pageSize = 1000;
-    let page = 0;
-    let hasMore = true;
-
-    while (hasMore) {
-      const { data, error } = await supabase
-        .from("students")
-        .select("*")
-        .order("name")
-        .range(page * pageSize, (page + 1) * pageSize - 1);
-
-      if (error) {
-        toast.error("Failed to fetch students");
-        break;
-      }
-
-      if (data && data.length > 0) {
-        allStudents.push(...data);
-        hasMore = data.length === pageSize;
-        page++;
-      } else {
-        hasMore = false;
-      }
+  // Fetch course count when course filter changes
+  useEffect(() => {
+    if (courseFilter && courseFilter !== "all") {
+      fetchCourseStudentCount(courseFilter);
+    } else {
+      setCourseStudentCount(0);
     }
+  }, [courseFilter]);
 
-    return allStudents;
-  };
+  const fetchInitialData = async () => {
+    try {
+      // Fetch only templates and unique courses (not all students)
+      const [templatesRes, coursesRes] = await Promise.all([
+        supabase.from("email_templates").select("*").order("name"),
+        supabase.from("students").select("course"),
+      ]);
 
-  const fetchData = async () => {
-    const [allStudents, templatesRes] = await Promise.all([
-      fetchAllStudents(),
-      supabase.from("email_templates").select("*").order("name"),
-    ]);
+      if (templatesRes.error) toast.error("Failed to fetch templates");
+      if (coursesRes.error) toast.error("Failed to fetch courses");
 
-    if (templatesRes.error) toast.error("Failed to fetch templates");
-
-    setStudents(allStudents);
-    setTemplates(templatesRes.data || []);
+      setTemplates(templatesRes.data || []);
+      
+      // Extract unique courses
+      const uniqueCourses = [...new Set((coursesRes.data || []).map((s) => s.course))];
+      setCourses(uniqueCourses.sort());
+    } catch (error) {
+      console.error("Error fetching initial data:", error);
+      toast.error("Failed to load data");
+    }
     setLoading(false);
   };
 
-  const uniqueCourses = [...new Set(students.map((s) => s.course))];
+  const fetchCourseStudentCount = async (course: string) => {
+    const { count, error } = await supabase
+      .from("students")
+      .select("*", { count: "exact", head: true })
+      .eq("course", course);
 
-  const filteredStudents =
-    courseFilter === "all"
-      ? students
-      : students.filter((s) => s.course === courseFilter);
-
-  const toggleStudent = (id: string) => {
-    setSelectedStudents((prev) =>
-      prev.includes(id) ? prev.filter((sid) => sid !== id) : [...prev, id]
-    );
+    if (!error && count !== null) {
+      setCourseStudentCount(count);
+    }
   };
 
-  const selectAll = () => {
-    if (selectedStudents.length === filteredStudents.length) {
-      setSelectedStudents([]);
-    } else {
-      setSelectedStudents(filteredStudents.map((s) => s.id));
+  // Search students by name or email
+  const searchStudents = useCallback(async (query: string) => {
+    if (!query.trim() || query.length < 2) {
+      setSearchResults([]);
+      return;
     }
+
+    setSearching(true);
+    try {
+      let queryBuilder = supabase
+        .from("students")
+        .select("id, name, email, course")
+        .or(`name.ilike.%${query}%,email.ilike.%${query}%`)
+        .limit(20);
+
+      if (courseFilter && courseFilter !== "all") {
+        queryBuilder = queryBuilder.eq("course", courseFilter);
+      }
+
+      const { data, error } = await queryBuilder;
+
+      if (error) {
+        toast.error("Search failed");
+        return;
+      }
+
+      // Filter out already selected students
+      const selectedIds = new Set(selectedStudents.map((s) => s.id));
+      setSearchResults((data || []).filter((s) => !selectedIds.has(s.id)));
+    } catch (error) {
+      console.error("Search error:", error);
+    }
+    setSearching(false);
+  }, [courseFilter, selectedStudents]);
+
+  // Debounced search
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      searchStudents(searchQuery);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery, searchStudents]);
+
+  // Select all students from a course
+  const selectAllFromCourse = async () => {
+    if (!courseFilter || courseFilter === "all") {
+      toast.error("Please select a course first");
+      return;
+    }
+
+    setSelectingAll(true);
+    try {
+      const allStudents: Student[] = [];
+      const pageSize = 1000;
+      let page = 0;
+      let hasMore = true;
+
+      while (hasMore) {
+        const { data, error } = await supabase
+          .from("students")
+          .select("id, name, email, course")
+          .eq("course", courseFilter)
+          .order("name")
+          .range(page * pageSize, (page + 1) * pageSize - 1);
+
+        if (error) {
+          toast.error("Failed to fetch students");
+          break;
+        }
+
+        if (data && data.length > 0) {
+          allStudents.push(...data);
+          hasMore = data.length === pageSize;
+          page++;
+        } else {
+          hasMore = false;
+        }
+      }
+
+      // Merge with existing selections (avoid duplicates)
+      const existingIds = new Set(selectedStudents.map((s) => s.id));
+      const newStudents = allStudents.filter((s) => !existingIds.has(s.id));
+      setSelectedStudents([...selectedStudents, ...newStudents]);
+      
+      toast.success(`Added ${newStudents.length} students from ${courseFilter}`);
+    } catch (error) {
+      console.error("Error selecting all:", error);
+      toast.error("Failed to select students");
+    }
+    setSelectingAll(false);
+  };
+
+  const addStudent = (student: Student) => {
+    if (!selectedStudents.find((s) => s.id === student.id)) {
+      setSelectedStudents([...selectedStudents, student]);
+    }
+    setSearchQuery("");
+    setSearchResults([]);
+  };
+
+  const removeStudent = (studentId: string) => {
+    setSelectedStudents(selectedStudents.filter((s) => s.id !== studentId));
+  };
+
+  const clearAllStudents = () => {
+    setSelectedStudents([]);
   };
 
   const getTemplate = () => templates.find((t) => t.id === selectedTemplate);
@@ -151,6 +247,13 @@ export default function Campaigns() {
       return;
     }
 
+    // Validate template has subject
+    const template = getTemplate();
+    if (!template?.subject?.trim()) {
+      toast.error("Template must have a subject line");
+      return;
+    }
+
     setSending(true);
 
     try {
@@ -172,38 +275,31 @@ export default function Campaigns() {
       if (campaignError) throw campaignError;
 
       // Create email logs for each recipient
-      const emailLogs = selectedStudents.map((studentId) => {
-        const student = students.find((s) => s.id === studentId)!;
-        return {
-          campaign_id: campaign.id,
-          student_id: studentId,
-          recipient_email: student.email,
-          recipient_name: student.name,
-          status: "pending",
-        };
-      });
+      const emailLogs = selectedStudents.map((student) => ({
+        campaign_id: campaign.id,
+        student_id: student.id,
+        recipient_email: student.email,
+        recipient_name: student.name,
+        status: "pending",
+      }));
 
       const { error: logsError } = await supabase.from("email_logs").insert(emailLogs);
       if (logsError) throw logsError;
 
       // Call edge function to send emails
-      const template = getTemplate()!;
-      const { data, error } = await supabase.functions.invoke("send-campaign-emails", {
+      const { error } = await supabase.functions.invoke("send-campaign-emails", {
         body: {
           campaignId: campaign.id,
           template: {
             subject: template.subject,
             body: template.body,
           },
-          recipients: selectedStudents.map((id) => {
-            const student = students.find((s) => s.id === id)!;
-            return {
-              id: student.id,
-              name: student.name,
-              email: student.email,
-              course: student.course,
-            };
-          }),
+          recipients: selectedStudents.map((student) => ({
+            id: student.id,
+            name: student.name,
+            email: student.email,
+            course: student.course,
+          })),
         },
       });
 
@@ -283,63 +379,118 @@ export default function Campaigns() {
             {/* Recipients Selection */}
             <Card className="shadow-card">
               <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle className="flex items-center gap-2">
-                    <Users className="h-5 w-5 text-primary" />
-                    Select Recipients
-                  </CardTitle>
-                  <Select value={courseFilter} onValueChange={setCourseFilter}>
-                    <SelectTrigger className="w-40">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Courses</SelectItem>
-                      {uniqueCourses.map((course) => (
-                        <SelectItem key={course} value={course}>
-                          {course}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                <CardTitle className="flex items-center gap-2">
+                  <Users className="h-5 w-5 text-primary" />
+                  Select Recipients
+                </CardTitle>
                 <CardDescription>
-                  {selectedStudents.length} of {filteredStudents.length} selected
+                  Search by name/email or select all from a course
                 </CardDescription>
               </CardHeader>
-              <CardContent>
-                {loading ? (
-                  <p className="text-center py-8 text-muted-foreground">Loading students...</p>
-                ) : filteredStudents.length === 0 ? (
-                  <div className="text-center py-8">
-                    <Users className="mx-auto h-12 w-12 text-muted-foreground/50" />
-                    <p className="mt-2 text-muted-foreground">No students found</p>
+              <CardContent className="space-y-4">
+                {/* Course Filter and Select All */}
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <div className="flex-1">
+                    <Select value={courseFilter} onValueChange={setCourseFilter}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Filter by course" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All Courses</SelectItem>
+                        {courses.map((course) => (
+                          <SelectItem key={course} value={course}>
+                            {course}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
-                ) : (
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 pb-2 border-b">
-                      <Checkbox
-                        checked={selectedStudents.length === filteredStudents.length}
-                        onCheckedChange={selectAll}
-                      />
-                      <span className="text-sm font-medium">Select All</span>
+                  <Button
+                    variant="outline"
+                    onClick={selectAllFromCourse}
+                    disabled={!courseFilter || courseFilter === "all" || selectingAll}
+                  >
+                    {selectingAll ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Loading...
+                      </>
+                    ) : (
+                      <>
+                        <Users className="mr-2 h-4 w-4" />
+                        Select All {courseFilter && courseFilter !== "all" && courseStudentCount > 0 && `(${courseStudentCount})`}
+                      </>
+                    )}
+                  </Button>
+                </div>
+
+                {/* Search Input */}
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    placeholder="Search by name or email..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="pl-10"
+                  />
+                  {searching && (
+                    <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+                  )}
+                </div>
+
+                {/* Search Results */}
+                {searchResults.length > 0 && (
+                  <div className="border rounded-lg divide-y max-h-48 overflow-y-auto">
+                    {searchResults.map((student) => (
+                      <div
+                        key={student.id}
+                        className="flex items-center justify-between p-3 hover:bg-muted/50 cursor-pointer"
+                        onClick={() => addStudent(student)}
+                      >
+                        <div>
+                          <p className="font-medium">{student.name}</p>
+                          <p className="text-sm text-muted-foreground">{student.email}</p>
+                        </div>
+                        <span className="rounded-full bg-accent px-2 py-0.5 text-xs text-accent-foreground">
+                          {student.course}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Selected Students */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label>Selected Recipients ({selectedStudents.length})</Label>
+                    {selectedStudents.length > 0 && (
+                      <Button variant="ghost" size="sm" onClick={clearAllStudents}>
+                        Clear All
+                      </Button>
+                    )}
+                  </div>
+                  
+                  {selectedStudents.length === 0 ? (
+                    <div className="text-center py-8 border rounded-lg border-dashed">
+                      <Users className="mx-auto h-12 w-12 text-muted-foreground/50" />
+                      <p className="mt-2 text-muted-foreground">
+                        No students selected. Search or select all from a course.
+                      </p>
                     </div>
-                    <div className="max-h-64 overflow-y-auto space-y-2">
-                      {filteredStudents.map((student) => (
+                  ) : (
+                    <div className="max-h-64 overflow-y-auto space-y-2 border rounded-lg p-2">
+                      {selectedStudents.map((student) => (
                         <div
                           key={student.id}
                           className="flex items-center justify-between rounded-lg border p-3 hover:bg-muted/50"
                         >
-                          <div className="flex items-center gap-3">
-                            <Checkbox
-                              checked={selectedStudents.includes(student.id)}
-                              onCheckedChange={() => toggleStudent(student.id)}
-                            />
-                            <div>
-                              <p className="font-medium">{student.name}</p>
-                              <p className="text-sm text-muted-foreground">{student.email}</p>
+                          <div className="flex items-center gap-3 flex-1 min-w-0">
+                            <div className="min-w-0 flex-1">
+                              <p className="font-medium truncate">{student.name}</p>
+                              <p className="text-sm text-muted-foreground truncate">{student.email}</p>
                             </div>
                           </div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-shrink-0">
                             <span className="rounded-full bg-accent px-2 py-0.5 text-xs text-accent-foreground">
                               {student.course}
                             </span>
@@ -352,12 +503,19 @@ export default function Campaigns() {
                                 <Eye className="h-4 w-4" />
                               </Button>
                             )}
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => removeStudent(student.id)}
+                            >
+                              <X className="h-4 w-4" />
+                            </Button>
                           </div>
                         </div>
                       ))}
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </CardContent>
             </Card>
           </div>
@@ -386,7 +544,10 @@ export default function Campaigns() {
                     onClick={handleSendCampaign}
                   >
                     {sending ? (
-                      "Sending..."
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Sending...
+                      </>
                     ) : (
                       <>
                         <Send className="mr-2 h-4 w-4" />
