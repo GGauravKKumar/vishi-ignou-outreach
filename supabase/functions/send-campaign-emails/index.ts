@@ -1,4 +1,4 @@
-//Gaurav 2314140125 - 2
+//Gaurav 2314140125 - 3
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { SMTPClient } from "https://deno.land/x/denomailer@1.6.0/mod.ts";
@@ -267,36 +267,23 @@ async function sendEmailWithRetry(
   fromDomain: string
 ): Promise<{ success: boolean; error?: string }> {
   
-  // Generate RFC 5322 required headers
-  const messageId = generateMessageId(fromDomain);
-  const dateHeader = formatRFC5322Date();
-  const encodedSubject = encodeSubjectRFC2047(subject);
-  
   console.log(`[Email] =============================================`);
-  console.log(`[Email] Sending email with RFC 5322 headers:`);
+  console.log(`[Email] Attempting to send email to: ${toEmail}`);
   console.log(`[Email]   From: ${fromAddress}`);
   console.log(`[Email]   To: ${toAddress}`);
-  console.log(`[Email]   Subject: ${encodedSubject.substring(0, 60)}...`);
-  console.log(`[Email]   Date: ${dateHeader}`);
-  console.log(`[Email]   Message-ID: ${messageId}`);
+  console.log(`[Email]   Subject: ${subject.substring(0, 60)}...`);
   console.log(`[Email] =============================================`);
   
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      // Build email with explicit RFC 5322 headers
-      // The denomailer library's send() accepts these parameters
+      // The denomailer library handles RFC 5322 headers (Date, Message-ID, etc.) automatically.
+      // Manually creating them was causing conflicts and duplicate header errors.
       await client.send({
         from: fromAddress,
         to: toAddress,
-        subject: encodedSubject,
+        subject: subject, // The library handles UTF-8 encoding.
+        content: textContent,
         html: htmlContent,
-        date: dateHeader,
-        headers: {
-          "Message-ID": messageId,
-          "MIME-Version": "1.0",
-          "X-Mailer": "CampaignMailer/2.0",
-          "X-Priority": "3",
-        },
       });
       
       console.log(`[Email] ✓ Successfully sent to ${toEmail}`);
