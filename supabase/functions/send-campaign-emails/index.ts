@@ -1,4 +1,4 @@
-//Gaurav 2314140125
+//Gaurav 2314140125 - 2
 import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { SMTPClient } from "https://deno.land/x/denomailer@1.6.0/mod.ts";
@@ -286,12 +286,12 @@ async function sendEmailWithRetry(
       // Build email with explicit RFC 5322 headers
       // The denomailer library's send() accepts these parameters
       await client.send({
+        from: fromAddress,
         to: toAddress,
         subject: encodedSubject,
         html: htmlContent,
         date: dateHeader,
         headers: {
-          "From": fromAddress,
           "Message-ID": messageId,
           "MIME-Version": "1.0",
           "X-Mailer": "CampaignMailer/2.0",
