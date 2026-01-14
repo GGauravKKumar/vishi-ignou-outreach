@@ -286,19 +286,18 @@ async function sendEmailWithRetry(
       // Build email with explicit RFC 5322 headers
       // The denomailer library's send() accepts these parameters
       await client.send({
-  from: fromAddress,
-  to: toAddress,
-  subject: encodedSubject,
-  html: htmlContent,
-  date: dateHeader,
-  headers: {
-    "From": fromAddress,
-    "Message-ID": messageId,
-    "MIME-Version": "1.0",
-    "X-Mailer": "CampaignMailer/2.0",
-    "X-Priority": "3",
-  }
-});
+        to: toAddress,
+        subject: encodedSubject,
+        html: htmlContent,
+        date: dateHeader,
+        headers: {
+          "From": fromAddress,
+          "Message-ID": messageId,
+          "MIME-Version": "1.0",
+          "X-Mailer": "CampaignMailer/2.0",
+          "X-Priority": "3",
+        },
+      });
       
       console.log(`[Email] ✓ Successfully sent to ${toEmail}`);
       return { success: true };
