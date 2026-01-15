@@ -82,8 +82,7 @@ function isValidFromAddress(fromName: string | undefined, fromEmail: string): bo
     console.error(`[Validation] Invalid From email: ${fromEmail}`);
     return false;
   }
-  if (fromName && /[
-]/.test(fromName)) {
+  if (fromName && /[\r\n]/.test(fromName)) {
     console.error(`[Validation] From name cannot contain newlines`);
     return false;
   }
@@ -107,8 +106,7 @@ function validateEmailConfig(
     errors.push(`Invalid From address: ${fromEmail}`);
   }
 
-  if (fromName && /[
-]/.test(fromName)) {
+  if (fromName && /[\r\n]/.test(fromName)) {
     errors.push('From name cannot contain newlines');
   }
 
@@ -191,8 +189,7 @@ function encodeSubjectRFC2047(subject: string): string {
 function sanitizeDisplayName(name: string): string {
   if (!name) return '';
   return name
-    .replace(/[
-]/g, '') // Remove newlines
+    .replace(/[\r\n]/g, '') // Remove newlines
     .replace(/[<>]/g, '')   // Remove angle brackets
     .trim();
 }
@@ -299,15 +296,9 @@ async function sendEmailWithRetry(
       // The denomailer library handles RFC 5322 headers (Date, Message-ID, etc.) automatically.
       // Pass the name and email separately to let the library handle formatting.
       await client.send({
-        from: {
-          name: from.name,
-          email: from.email,
-        },
-        to: {
-          name: to.name,
-          email: to.email,
-        },
-        subject: subject, // The library handles UTF-8 encoding.
+        from: from.name ? `"${from.name}" <${from.email}>` : from.email,
+        to: to.name ? `"${to.name}" <${to.email}>` : to.email,
+        subject: subject,
         content: textContent,
         html: htmlContent,
       });
