@@ -79,19 +79,39 @@ export default function Campaigns() {
 
   const fetchInitialData = async () => {
     try {
-      // Fetch only templates and unique courses (not all students)
-      const [templatesRes, coursesRes] = await Promise.all([
-        supabase.from("email_templates").select("*").order("name"),
-        supabase.from("students").select("course"),
-      ]);
-
+      // Fetch templates
+      const templatesRes = await supabase.from("email_templates").select("*").order("name");
       if (templatesRes.error) toast.error("Failed to fetch templates");
-      if (coursesRes.error) toast.error("Failed to fetch courses");
-
       setTemplates(templatesRes.data || []);
-      
+
+      // Fetch ALL courses by paginating through all students
+      const allCourses: string[] = [];
+      const pageSize = 1000;
+      let page = 0;
+      let hasMore = true;
+
+      while (hasMore) {
+        const { data, error } = await supabase
+          .from("students")
+          .select("course")
+          .range(page * pageSize, (page + 1) * pageSize - 1);
+
+        if (error) {
+          toast.error("Failed to fetch courses");
+          break;
+        }
+
+        if (data && data.length > 0) {
+          allCourses.push(...data.map((s) => s.course));
+          hasMore = data.length === pageSize;
+          page++;
+        } else {
+          hasMore = false;
+        }
+      }
+
       // Extract unique courses
-      const uniqueCourses = [...new Set((coursesRes.data || []).map((s) => s.course))];
+      const uniqueCourses = [...new Set(allCourses)];
       setCourses(uniqueCourses.sort());
     } catch (error) {
       console.error("Error fetching initial data:", error);

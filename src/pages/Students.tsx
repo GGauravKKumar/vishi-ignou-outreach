@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { Users, RefreshCw, Search, Upload, Trash2, FileSpreadsheet, Plus, Download, Loader2 } from "lucide-react";
+import { Users, RefreshCw, Search, Upload, Trash2, FileSpreadsheet, Plus, Download, Loader2, ChevronLeft, ChevronRight } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -51,6 +51,10 @@ export default function Students() {
   const [parsedStudents, setParsedStudents] = useState<ParsedStudent[]>([]);
   const [activeTab, setActiveTab] = useState("upload");
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 25;
 
   // Google Sheets config
   const [sheetUrl, setSheetUrl] = useState("");
@@ -214,6 +218,17 @@ export default function Students() {
       s.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
       s.course.toLowerCase().includes(searchTerm.toLowerCase())
   );
+
+  // Reset to page 1 when search term changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm]);
+
+  // Pagination calculations
+  const totalPages = Math.ceil(filteredStudents.length / pageSize);
+  const startIndex = (currentPage - 1) * pageSize;
+  const endIndex = startIndex + pageSize;
+  const paginatedStudents = filteredStudents.slice(startIndex, endIndex);
 
   const uniqueCourses = [...new Set(students.map((s) => s.course))];
 
@@ -485,66 +500,100 @@ export default function Students() {
         {/* Table */}
         <Card className="shadow-card">
           <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Email</TableHead>
-                  <TableHead>Course</TableHead>
-                  <TableHead>Added</TableHead>
-                  <TableHead className="w-16"></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {loading ? (
+            <div className="max-h-[600px] overflow-auto">
+              <Table>
+                <TableHeader>
                   <TableRow>
-                    <TableCell colSpan={5} className="text-center py-8">
-                      <Loader2 className="mx-auto h-6 w-6 animate-spin text-primary" />
-                      <p className="mt-2 text-muted-foreground">Loading students...</p>
-                    </TableCell>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Email</TableHead>
+                    <TableHead>Course</TableHead>
+                    <TableHead>Added</TableHead>
+                    <TableHead className="w-16"></TableHead>
                   </TableRow>
-                ) : filteredStudents.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={5} className="text-center py-8">
-                      <Users className="mx-auto h-12 w-12 text-muted-foreground/50" />
-                      <p className="mt-2 text-muted-foreground">No students found</p>
-                      <Button 
-                        variant="link" 
-                        className="mt-2"
-                        onClick={() => setBulkDialogOpen(true)}
-                      >
-                        Import students from CSV
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  filteredStudents.map((student) => (
-                    <TableRow key={student.id}>
-                      <TableCell className="font-medium">{student.name}</TableCell>
-                      <TableCell>{student.email}</TableCell>
-                      <TableCell>
-                        <span className="rounded-full bg-accent px-2.5 py-1 text-xs font-medium text-accent-foreground">
-                          {student.course}
-                        </span>
+                </TableHeader>
+                <TableBody>
+                  {loading ? (
+                    <TableRow>
+                      <TableCell colSpan={5} className="text-center py-8">
+                        <Loader2 className="mx-auto h-6 w-6 animate-spin text-primary" />
+                        <p className="mt-2 text-muted-foreground">Loading students...</p>
                       </TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {new Date(student.created_at).toLocaleDateString()}
-                      </TableCell>
-                      <TableCell>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="text-destructive hover:bg-destructive/10"
-                          onClick={() => handleDeleteStudent(student.id)}
+                    </TableRow>
+                  ) : paginatedStudents.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5} className="text-center py-8">
+                        <Users className="mx-auto h-12 w-12 text-muted-foreground/50" />
+                        <p className="mt-2 text-muted-foreground">No students found</p>
+                        <Button 
+                          variant="link" 
+                          className="mt-2"
+                          onClick={() => setBulkDialogOpen(true)}
                         >
-                          <Trash2 className="h-4 w-4" />
+                          Import students from CSV
                         </Button>
                       </TableCell>
                     </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
+                  ) : (
+                    paginatedStudents.map((student) => (
+                      <TableRow key={student.id}>
+                        <TableCell className="font-medium">{student.name}</TableCell>
+                        <TableCell>{student.email}</TableCell>
+                        <TableCell>
+                          <span className="rounded-full bg-accent px-2.5 py-1 text-xs font-medium text-accent-foreground">
+                            {student.course}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {new Date(student.created_at).toLocaleDateString()}
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="text-destructive hover:bg-destructive/10"
+                            onClick={() => handleDeleteStudent(student.id)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+
+            {/* Pagination Controls */}
+            {filteredStudents.length > pageSize && (
+              <div className="flex items-center justify-between border-t px-4 py-3">
+                <p className="text-sm text-muted-foreground">
+                  Showing {startIndex + 1}-{Math.min(endIndex, filteredStudents.length)} of {filteredStudents.length} students
+                </p>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                    disabled={currentPage === 1}
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                    Previous
+                  </Button>
+                  <span className="text-sm font-medium px-2">
+                    Page {currentPage} of {totalPages}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={currentPage === totalPages}
+                  >
+                    Next
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>
